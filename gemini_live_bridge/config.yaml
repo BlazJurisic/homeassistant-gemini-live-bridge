@@ -1,5 +1,5 @@
 name: Gemini Live Bridge
-version: "1.0.2"
+version: "1.0.3"
 slug: gemini_live_bridge
 description: Full-duplex voice assistant bridge using Gemini Live API
 arch:
