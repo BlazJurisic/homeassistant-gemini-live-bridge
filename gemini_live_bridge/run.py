@@ -359,14 +359,18 @@ Ti: [pozovi end_conversation()] "Doviđenja!"
     async def start(self):
         """Start the Gemini session"""
         logger.info(f"Starting Gemini session {self.session_id}")
+        logger.debug(f"Model: {MODEL}")
+        logger.debug(f"API Key configured: {'Yes' if GEMINI_API_KEY else 'No'}")
 
         self.active = True
 
         try:
+            logger.debug("Connecting to Gemini Live API...")
             async with (
                 self.client.aio.live.connect(model=MODEL, config=self.config) as session,
                 asyncio.TaskGroup() as tg,
             ):
+                logger.info("Successfully connected to Gemini Live API")
                 self.session = session
 
                 # Start background tasks
@@ -381,9 +385,11 @@ Ti: [pozovi end_conversation()] "Doviđenja!"
                 raise asyncio.CancelledError("Session ended")
 
         except asyncio.CancelledError:
-            pass
+            logger.debug("Gemini session cancelled normally")
         except Exception as e:
             logger.error(f"Error in Gemini session: {e}", exc_info=True)
+            logger.error(f"Exception type: {type(e).__name__}")
+            logger.error(f"Is API key set: {'Yes' if GEMINI_API_KEY else 'No'}")
         finally:
             self.active = False
             logger.info(f"Gemini session {self.session_id} terminated")
@@ -411,7 +417,9 @@ class DeviceConnection:
             self.active = True
 
             # Create Gemini session
+            logger.debug(f"Creating Gemini session for {self.session_id}")
             self.gemini_session = GeminiSession(self.ha_client, self.session_id)
+            logger.debug(f"Gemini session created, starting tasks...")
 
             # Start tasks
             async with asyncio.TaskGroup() as tg:
@@ -427,9 +435,11 @@ class DeviceConnection:
                 raise asyncio.CancelledError("Session ended")
 
         except asyncio.CancelledError:
-            pass
+            logger.debug("Device connection cancelled")
         except Exception as e:
             logger.error(f"Error handling device: {e}", exc_info=True)
+            logger.error(f"Exception type: {type(e).__name__}")
+            logger.error(f"Exception args: {e.args}")
         finally:
             self.active = False
             await self.cleanup()
