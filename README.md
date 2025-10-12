@@ -1,77 +1,82 @@
-# Gemini Live Bridge Add-on
+# Gemini Live Bridge for Home Assistant
 
-Full-duplex voice assistant bridge for Home Assistant using Google's Gemini Live API.
+Full-duplex voice assistant add-on using Google's Gemini Live API for natural, interruptible conversations in Croatian.
 
-## Configuration
+## Installation
 
-### Required:
-- **gemini_api_key**: Your Google Gemini API key (get it from https://aistudio.google.com/apikey)
+### Add Repository to Home Assistant
 
-### Optional:
-- **server_port**: TCP port for device connections (default: 9872)
-- **log_level**: Logging level - debug, info, warning, error (default: info)
-- **croatian_personality**: Use Croatian personality for the assistant (default: true)
-- **session_timeout_seconds**: Automatic session timeout (default: 300)
+1. In Home Assistant, go to **Settings → Add-ons → Add-on Store**
+2. Click the **three dots** (⋮) in the top right
+3. Select **Repositories**
+4. Add this URL:
+   ```
+   https://github.com/BlazJurisic/homeassistant-gemini-live-bridge
+   ```
+5. Click **Add**
+6. Refresh the page
+7. Find **"Gemini Live Bridge"** in the add-on store
+8. Click **Install**
 
-## How it Works
+### Configuration
 
-This add-on creates a bridge between ESP32 voice devices and Google's Gemini Live API, enabling full-duplex conversations with Home Assistant device control.
+You'll need a **Google Gemini API key**. Get one from:
+https://aistudio.google.com/apikey
 
-### Flow:
-1. Voice device detects wake word ("Hey Jarvis")
-2. Device connects to this bridge (port 9872)
-3. Bridge opens Gemini Live session
-4. Audio streams bidirectionally
-5. Gemini can call Home Assistant services to control devices
-6. Session ends when user says goodbye or after timeout
+Configure the add-on with:
+- `gemini_api_key`: Your API key (required)
+- `server_port`: 9872 (default)
+- `log_level`: info (default)
+- `croatian_personality`: true (default)
+- `session_timeout_seconds`: 300 (default)
 
-## First Time Setup
+### How It Works
 
-1. Get your Gemini API key from https://aistudio.google.com/apikey
-2. Install this add-on
-3. Configure your API key in the add-on configuration
-4. Start the add-on
-5. Check logs to verify it's running
+This add-on creates a bridge between ESP32 voice devices (like Home Assistant Voice Preview Edition) and Google's Gemini Live API, enabling:
 
-## Usage
+- ✅ Full duplex conversation (can interrupt AI mid-sentence)
+- ✅ Wake word activation ("Hey Jarvis")
+- ✅ Croatian language support
+- ✅ Natural conversation with female Croatian voice
+- ✅ Direct Home Assistant device control
+- ✅ Session-based operation (ends with "doviđenja" or "hvala, to je sve")
 
-The bridge listens on port 9872 for incoming connections from voice devices.
+### Example Commands (Croatian)
 
-### Supported Commands (Croatian):
 - "Upali svjetlo u kuhinji" - Turn on kitchen light
 - "Promijeni boju u plavu" - Change color to blue
 - "Ugasi svjetlo" - Turn off light
 - "Hvala, to je sve" - End conversation
 
-## Troubleshooting
+## Usage Flow
 
-### Check Logs:
-Go to Add-on → Log tab to see what's happening
+1. Say **"Hey Jarvis"** to wake device
+2. Device connects to bridge (port 9872)
+3. Bridge opens Gemini Live session
+4. Have natural conversation with interruptions
+5. AI controls your devices via Home Assistant API
+6. Say goodbye to end session
 
-### Common Issues:
+## Requirements
 
-**"GEMINI_API_KEY not set!"**
-- Add your API key in the add-on configuration
+- Home Assistant 2025.2+ (for optimal compatibility)
+- Google Gemini API key
+- ESP32 voice device (custom firmware required - see documentation)
 
-**"Failed to connect to Home Assistant"**
-- The add-on should automatically connect via Supervisor
-- Check that Home Assistant is running
+## Documentation
 
-**"No device connections"**
-- Ensure your ESP32 device is configured with correct bridge host
-- Check network connectivity
-- Verify port 9872 is accessible
-
-## Function Calling
-
-The bridge exposes these functions to Gemini:
-
-1. **control_device**: Turn on/off lights, change colors, set brightness
-2. **query_device_state**: Get current state of devices
-3. **end_conversation**: End the session and return to wake word mode
+For complete setup and implementation details, see the full documentation in the repository.
 
 ## Support
 
-For issues and documentation, see:
-- Main documentation: `/config/TODO_FULL_DUPLEX.md`
-- Environment context: `/config/claude.md`
+For issues, questions, or contributions, please open an issue on GitHub.
+
+## License
+
+MIT License
+
+## Credits
+
+- Built for Home Assistant community
+- Uses Google Gemini Live API
+- Croatian language support
