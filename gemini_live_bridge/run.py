@@ -427,6 +427,9 @@ class DeviceConnection:
 
             logger.debug(f"Starting session tasks...")
 
+            # Mark session as active before starting tasks
+            self.gemini_session.active = True
+
             # Start tasks
             try:
                 async with asyncio.TaskGroup() as tg:
@@ -440,6 +443,9 @@ class DeviceConnection:
                     tg.create_task(self.gemini_session.start())
 
                     logger.debug("All tasks created, waiting for session")
+
+                    # Give tasks time to start
+                    await asyncio.sleep(0.1)
 
                     # Wait for session to end
                     while self.active and self.gemini_session.active:
