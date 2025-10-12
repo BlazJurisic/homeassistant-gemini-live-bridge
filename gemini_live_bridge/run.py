@@ -418,21 +418,40 @@ class DeviceConnection:
 
             # Create Gemini session
             logger.debug(f"Creating Gemini session for {self.session_id}")
-            self.gemini_session = GeminiSession(self.ha_client, self.session_id)
-            logger.debug(f"Gemini session created, starting tasks...")
+            try:
+                self.gemini_session = GeminiSession(self.ha_client, self.session_id)
+                logger.debug(f"Gemini session created successfully")
+            except Exception as e:
+                logger.error(f"Failed to create Gemini session: {e}", exc_info=True)
+                raise
+
+            logger.debug(f"Starting session tasks...")
 
             # Start tasks
-            async with asyncio.TaskGroup() as tg:
-                tg.create_task(self.receive_from_device())
-                tg.create_task(self.send_to_device())
-                tg.create_task(self.gemini_session.start())
+            try:
+                async with asyncio.TaskGroup() as tg:
+                    logger.debug("Creating receive_from_device task")
+                    tg.create_task(self.receive_from_device())
 
-                # Wait for session to end
-                while self.active and self.gemini_session.active:
-                    await asyncio.sleep(0.1)
+                    logger.debug("Creating send_to_device task")
+                    tg.create_task(self.send_to_device())
 
-                logger.info("Device session ending")
-                raise asyncio.CancelledError("Session ended")
+                    logger.debug("Creating gemini_session.start task")
+                    tg.create_task(self.gemini_session.start())
+
+                    logger.debug("All tasks created, waiting for session")
+
+                    # Wait for session to end
+                    while self.active and self.gemini_session.active:
+                        await asyncio.sleep(0.1)
+
+                    logger.info("Device session ending")
+                    raise asyncio.CancelledError("Session ended")
+            except* Exception as eg:
+                logger.error(f"TaskGroup exception(s): {eg.exceptions}")
+                for exc in eg.exceptions:
+                    logger.error(f"  - {type(exc).__name__}: {exc}", exc_info=exc)
+                raise
 
         except asyncio.CancelledError:
             logger.debug("Device connection cancelled")
