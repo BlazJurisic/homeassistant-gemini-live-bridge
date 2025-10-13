@@ -305,13 +305,17 @@ Ti: [pozovi end_conversation()] "Doviđenja!"
     async def send_audio_to_gemini(self):
         """Background task to send audio from device to Gemini"""
         try:
+            logger.debug("Starting send_audio_to_gemini task")
             while self.active:
+                logger.debug("Waiting for audio from device...")
                 audio_data = await self.audio_out_queue.get()
                 if audio_data is None:
                     break
 
+                logger.debug(f"Sending {len(audio_data)} bytes to Gemini")
                 # Use the new API method instead of deprecated session.send
                 await self.session.send(input={"data": audio_data, "mime_type": "audio/pcm"})
+            logger.debug("Exited send loop, session no longer active")
         except Exception as e:
             logger.error(f"Error sending audio to Gemini: {e}", exc_info=True)
 
@@ -388,8 +392,13 @@ Ti: [pozovi end_conversation()] "Doviđenja!"
                 self.session = session
 
                 # Start background tasks
-                tg.create_task(self.send_audio_to_gemini())
-                tg.create_task(self.receive_audio_from_gemini())
+                logger.debug("Creating send_audio_to_gemini task...")
+                send_task = tg.create_task(self.send_audio_to_gemini())
+                logger.debug(f"Send task created: {send_task}")
+
+                logger.debug("Creating receive_audio_from_gemini task...")
+                receive_task = tg.create_task(self.receive_audio_from_gemini())
+                logger.debug(f"Receive task created: {receive_task}")
 
                 # Wait until session ends
                 while self.active:
