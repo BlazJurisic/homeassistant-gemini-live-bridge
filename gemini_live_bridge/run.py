@@ -321,6 +321,7 @@ Ti: [pozovi end_conversation()] "Doviđenja!"
 
     async def receive_audio_from_gemini(self):
         """Background task to receive audio and function calls from Gemini"""
+        logger.info("receive_audio_from_gemini() ENTERED")  # Outside try block
         try:
             logger.debug("Starting receive_audio_from_gemini task")
             while self.active:
@@ -399,6 +400,11 @@ Ti: [pozovi end_conversation()] "Doviđenja!"
                 logger.debug("Creating receive_audio_from_gemini task...")
                 receive_task = tg.create_task(self.receive_audio_from_gemini())
                 logger.debug(f"Receive task created: {receive_task}")
+
+                # Force yield to allow both tasks to start
+                logger.debug("Yielding control to allow tasks to start...")
+                await asyncio.sleep(0)
+                logger.debug("Back from yield, checking task status...")
 
                 # Wait until session ends
                 while self.active:
