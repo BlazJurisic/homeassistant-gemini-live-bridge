@@ -43,7 +43,7 @@ CHANNELS = 1
 CHUNK_SIZE = 1024
 
 # Gemini configuration
-MODEL = "models/gemini-2.0-flash-exp"
+MODEL = "models/gemini-2.5-flash-native-audio-preview-09-2025"
 
 # Setup logging
 logging.basicConfig(
@@ -115,7 +115,7 @@ class GeminiSession:
         self.ha_client = ha_client
         self.session_id = session_id
         self.client = genai.Client(
-            http_options={"api_version": "v1alpha"},
+            http_options={"api_version": "v1beta"},
             api_key=GEMINI_API_KEY
         )
 
@@ -160,12 +160,17 @@ Ti: [pozovi end_conversation()] "Doviđenja!"
 
         self.config = types.LiveConnectConfig(
             response_modalities=["AUDIO"],
+            media_resolution="MEDIA_RESOLUTION_MEDIUM",
             speech_config=types.SpeechConfig(
                 voice_config=types.VoiceConfig(
                     prebuilt_voice_config=types.PrebuiltVoiceConfig(
-                        voice_name="Aoede"  # Female voice
+                        voice_name="Zephyr"  # Newer voice
                     )
                 )
+            ),
+            context_window_compression=types.ContextWindowCompressionConfig(
+                trigger_tokens=25600,
+                sliding_window=types.SlidingWindow(target_tokens=12800),
             ),
             system_instruction=types.Content(
                 parts=[types.Part.from_text(text=system_instruction)],
@@ -305,9 +310,8 @@ Ti: [pozovi end_conversation()] "Doviđenja!"
                 if audio_data is None:
                     break
 
-                await self.session.send(
-                    input={"data": audio_data, "mime_type": "audio/pcm"}
-                )
+                # Use the new API method instead of deprecated session.send
+                await self.session.send(input={"data": audio_data, "mime_type": "audio/pcm"})
         except Exception as e:
             logger.error(f"Error sending audio to Gemini: {e}", exc_info=True)
 
