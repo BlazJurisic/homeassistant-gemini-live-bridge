@@ -318,20 +318,28 @@ Ti: [pozovi end_conversation()] "Doviđenja!"
     async def receive_audio_from_gemini(self):
         """Background task to receive audio and function calls from Gemini"""
         try:
+            logger.debug("Starting receive_audio_from_gemini task")
             while self.active:
+                logger.debug("Waiting for turn from Gemini...")
                 turn = self.session.receive()
+                logger.debug(f"Got turn object: {type(turn)}")
+
                 async for response in turn:
+                    logger.debug(f"Got response from turn: {response}")
+
                     # Handle audio data
                     if data := response.data:
+                        logger.info(f"Received audio data: {len(data)} bytes")
                         await self.audio_in_queue.put(data)
                         continue
 
                     # Handle text (for debugging)
                     if text := response.text:
-                        logger.debug(f"Gemini text: {text}")
+                        logger.info(f"Gemini text: {text}")
 
                     # Handle function calls
                     if response.tool_call:
+                        logger.info(f"Got tool_call: {response.tool_call}")
                         for function_call in response.tool_call.function_calls:
                             result = await self.handle_function_call(function_call)
 
@@ -350,6 +358,7 @@ Ti: [pozovi end_conversation()] "Doviđenja!"
                                 self.active = False
                                 return
 
+                logger.debug("Turn complete")
                 # Handle interruptions: clear audio queue
                 while not self.audio_in_queue.empty():
                     try:
@@ -357,6 +366,7 @@ Ti: [pozovi end_conversation()] "Doviđenja!"
                     except asyncio.QueueEmpty:
                         break
 
+            logger.debug("Exited receive loop, session no longer active")
         except Exception as e:
             logger.error(f"Error receiving from Gemini: {e}", exc_info=True)
 
