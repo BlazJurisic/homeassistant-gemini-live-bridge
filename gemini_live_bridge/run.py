@@ -390,14 +390,13 @@ Ti: [pozovi end_conversation()] "Doviđenja!"
                 logger.info("Waiting for Gemini turn...")
                 turn = self.session.receive()
 
-                # Collect ALL audio for the entire turn before sending (like TTS)
-                turn_audio = bytearray()
-
                 async for response in turn:
-                    # Handle audio data - accumulate, don't send yet
+                    # Handle audio data - stream immediately for low latency
                     if data := response.data:
                         chunks_from_gemini += 1
-                        turn_audio.extend(data)
+                        if chunks_from_gemini % 10 == 1:
+                            logger.info(f"Gemini audio chunk #{chunks_from_gemini}: {len(data)} bytes")
+                        await self.audio_in_queue.put(data)
                         continue
 
                     # Handle text (for debugging)
@@ -425,12 +424,7 @@ Ti: [pozovi end_conversation()] "Doviđenja!"
                                 self.active = False
                                 return
 
-                # Turn complete - queue entire turn's audio at once
-                if turn_audio:
-                    await self.audio_in_queue.put(bytes(turn_audio))
-                    logger.info(f"Turn complete: {len(turn_audio)} bytes audio queued, {chunks_from_gemini} total Gemini chunks")
-                else:
-                    logger.info(f"Turn complete: no audio, {chunks_from_gemini} total Gemini chunks")
+                logger.info(f"Turn complete, total Gemini chunks: {chunks_from_gemini}")
 
             logger.info("Exited receive loop, session no longer active")
         except Exception as e:
