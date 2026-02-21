@@ -584,7 +584,7 @@ class DeviceConnection:
                     audio_data = process_gemini_audio(audio_data)
 
                     # Split into chunks and batch write (single drain)
-                    MAX_DEVICE_CHUNK = 3840
+                    MAX_DEVICE_CHUNK = 8192
                     offset = 0
                     while offset < len(audio_data):
                         chunk = audio_data[offset:offset + MAX_DEVICE_CHUNK]
