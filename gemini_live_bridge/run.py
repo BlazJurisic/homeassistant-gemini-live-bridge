@@ -409,6 +409,7 @@ Ti: [pozovi end_conversation()] "Doviđenja!"
                             await self.session.send_tool_response(
                                 function_responses=[
                                     types.FunctionResponse(
+                                        id=function_call.id,
                                         name=function_call.name,
                                         response=result
                                     )
