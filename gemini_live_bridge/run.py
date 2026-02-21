@@ -66,13 +66,23 @@ DEVICE_BITS_PER_SAMPLE = 32  # ESP32 I2S sends 32-bit samples
 
 
 def convert_32bit_to_16bit(data: bytes) -> bytes:
-    """Convert 32-bit stereo I2S to 16-bit mono PCM (channel 0 only = XMOS AEC processed)."""
+    """Convert 32-bit stereo I2S to 16-bit mono PCM.
+    Try channel 0 (even) = XMOS AEC processed. Log both channels for debug."""
     if len(data) % 4 != 0:
         return data
     samples_32 = np.frombuffer(data, dtype='<i4')
-    # Extract channel 0 only (even indices) - this is the XMOS AEC-processed channel
-    mono = samples_32[0::2] if len(samples_32) >= 2 else samples_32
-    return (mono >> 16).astype('<i2').tobytes()
+    ch0 = samples_32[0::2]  # even = left
+    ch1 = samples_32[1::2]  # odd = right
+    # Use channel 0 for now
+    return (ch0 >> 16).astype('<i2').tobytes()
+
+
+def _debug_stereo_peaks(data: bytes) -> str:
+    """Return peak of both channels for debugging."""
+    samples_32 = np.frombuffer(data, dtype='<i4')
+    ch0 = np.abs(samples_32[0::2] >> 16).max() if len(samples_32) >= 2 else 0
+    ch1 = np.abs(samples_32[1::2] >> 16).max() if len(samples_32) >= 2 else 0
+    return f"ch0={ch0} ch1={ch1}"
 
 
 def process_gemini_audio(data: bytes) -> bytes:
@@ -371,13 +381,13 @@ Ti: [pozovi end_conversation()] "Doviđenja!"
 
                 await self.session.send_realtime_input(audio={"data": audio_data, "mime_type": "audio/pcm"})
                 chunks_to_gemini += 1
-                if chunks_to_gemini % 25 == 1:
+                if chunks_to_gemini % 10 == 1:
                     samples = array.array('h')
                     samples.frombytes(audio_data)
                     if samples:
                         peak = max(abs(s) for s in samples)
                         playing = "SPEAKER_ON" if self.playing else "speaker_off"
-                        logger.info(f"MIC #{chunks_to_gemini}: raw={raw_len}B→{len(audio_data)}B peak={peak} [{playing}]")
+                        logger.info(f"MIC #{chunks_to_gemini}: {raw_len}→{len(audio_data)}B peak={peak} [{playing}]")
             logger.info("Exited send loop, session no longer active")
         except Exception as e:
             logger.error(f"Error sending audio to Gemini: {e}", exc_info=True)
