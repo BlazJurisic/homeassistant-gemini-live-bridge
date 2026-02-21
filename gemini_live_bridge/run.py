@@ -375,11 +375,6 @@ Ti: [pozovi end_conversation()] "Doviđenja!"
 
                 # Convert 32-bit I2S samples to 16-bit PCM for Gemini
                 if DEVICE_BITS_PER_SAMPLE == 32:
-                    if chunks_to_gemini % 100 == 0:
-                        # Log raw 32-bit values before conversion
-                        raw32 = array.array('i')
-                        raw32.frombytes(audio_data[:16])  # First 4 samples
-                        logger.info(f"Raw 32-bit samples: {[hex(s & 0xFFFFFFFF) for s in raw32]}")
                     audio_data = convert_32bit_to_16bit(audio_data)
 
                 await self.session.send_realtime_input(audio={"data": audio_data, "mime_type": "audio/pcm"})
@@ -428,13 +423,13 @@ Ti: [pozovi end_conversation()] "Doviđenja!"
                             result = await self.handle_function_call(function_call)
 
                             # Send function response back to Gemini
-                            await self.session.send(
-                                input=types.Content(
-                                    parts=[types.Part.from_function_response(
+                            await self.session.send_tool_response(
+                                function_responses=[
+                                    types.FunctionResponse(
                                         name=function_call.name,
                                         response=result
-                                    )]
-                                )
+                                    )
+                                ]
                             )
 
                             # Check if conversation should end
