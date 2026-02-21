@@ -603,16 +603,21 @@ class DeviceConnection:
                     if DEVICE_BITS_PER_SAMPLE == 32:
                         audio_data = convert_16bit_to_32bit(audio_data)
 
-                    # Send to device with length header
-                    length = len(audio_data)
-                    header = struct.pack('>I', length)
+                    # Split into chunks that fit ESP32 speaker buffer (max 3840 bytes)
+                    MAX_DEVICE_CHUNK = 3840
+                    offset = 0
+                    while offset < len(audio_data):
+                        chunk = audio_data[offset:offset + MAX_DEVICE_CHUNK]
+                        length = len(chunk)
+                        header = struct.pack('>I', length)
 
-                    self.writer.write(header + audio_data)
-                    await self.writer.drain()
-                    chunks_sent += 1
+                        self.writer.write(header + chunk)
+                        await self.writer.drain()
+                        chunks_sent += 1
+                        offset += MAX_DEVICE_CHUNK
 
                     if chunks_sent % 10 == 1:
-                        logger.info(f"Sent audio chunk #{chunks_sent} to device: {length} bytes")
+                        logger.info(f"Sent audio chunk #{chunks_sent} to device: {len(audio_data)} bytes total")
 
         except Exception as e:
             logger.error(f"Error sending to device: {e}", exc_info=True)
