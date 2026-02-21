@@ -171,6 +171,7 @@ class GeminiSession:
         self.audio_out_queue = asyncio.Queue(maxsize=50)
         self.session = None
         self.active = False
+        self.playing = False  # True while sending audio to speaker (mute mic)
 
         # System instructions
         if CROATIAN_PERSONALITY:
@@ -420,16 +421,10 @@ Ti: [pozovi end_conversation()] "Doviđenja!"
                                 self.active = False
                                 return
 
-                # Turn complete - flush queue for interruption support
-                # (same as Google example: user can interrupt, old audio is discarded)
-                flushed = 0
-                while not self.audio_in_queue.empty():
-                    try:
-                        self.audio_in_queue.get_nowait()
-                        flushed += 1
-                    except asyncio.QueueEmpty:
-                        break
-                logger.info(f"Turn complete, {chunks_from_gemini} Gemini chunks, flushed {flushed} unplayed")
+                # Turn complete - do NOT flush queue
+                # XMOS echo cancellation should prevent self-interruption
+                # but if it doesn't, flushing would discard valid audio
+                logger.info(f"Turn complete, {chunks_from_gemini} Gemini chunks, queue: {self.audio_in_queue.qsize()}")
 
             logger.info("Exited receive loop, session no longer active")
         except Exception as e:
