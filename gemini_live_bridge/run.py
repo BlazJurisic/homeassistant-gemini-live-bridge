@@ -390,13 +390,14 @@ Ti: [pozovi end_conversation()] "Doviđenja!"
                 logger.info("Waiting for Gemini turn...")
                 turn = self.session.receive()
 
+                # Collect ALL audio for the entire turn before sending (like TTS)
+                turn_audio = bytearray()
+
                 async for response in turn:
-                    # Handle audio data
+                    # Handle audio data - accumulate, don't send yet
                     if data := response.data:
                         chunks_from_gemini += 1
-                        if chunks_from_gemini % 10 == 1:
-                            logger.info(f"Gemini audio chunk #{chunks_from_gemini}: {len(data)} bytes, queue size: {self.audio_in_queue.qsize()}")
-                        await self.audio_in_queue.put(data)
+                        turn_audio.extend(data)
                         continue
 
                     # Handle text (for debugging)
@@ -424,7 +425,12 @@ Ti: [pozovi end_conversation()] "Doviđenja!"
                                 self.active = False
                                 return
 
-                logger.info(f"Turn complete, audio_in_queue size: {self.audio_in_queue.qsize()}, total Gemini chunks: {chunks_from_gemini}")
+                # Turn complete - queue entire turn's audio at once
+                if turn_audio:
+                    await self.audio_in_queue.put(bytes(turn_audio))
+                    logger.info(f"Turn complete: {len(turn_audio)} bytes audio queued, {chunks_from_gemini} total Gemini chunks")
+                else:
+                    logger.info(f"Turn complete: no audio, {chunks_from_gemini} total Gemini chunks")
 
             logger.info("Exited receive loop, session no longer active")
         except Exception as e:
@@ -573,55 +579,40 @@ class DeviceConnection:
             logger.info(f"receive_from_device ended, total chunks: {chunks_from_device}")
 
     async def send_to_device(self):
-        """Receive audio from Gemini and send to device"""
+        """Send raw 24kHz 16-bit mono audio to device. ESP32 converts locally."""
         logger.info("send_to_device task started")
         chunks_sent = 0
-        MAX_DEVICE_CHUNK = 4096
+        MAX_DEVICE_CHUNK = 1024
         try:
             while self.active:
                 if not self.gemini_session:
                     await asyncio.sleep(0.1)
                     continue
 
-                # Batch collect: wait for one chunk, then grab ALL queued chunks
-                batch = bytearray()
                 try:
                     data = await asyncio.wait_for(
                         self.gemini_session.audio_in_queue.get(), timeout=1.0
                     )
-                    batch.extend(data)
                 except asyncio.TimeoutError:
                     continue
 
-                # Drain everything currently queued (non-blocking)
-                while not self.gemini_session.audio_in_queue.empty():
-                    try:
-                        batch.extend(self.gemini_session.audio_in_queue.get_nowait())
-                    except asyncio.QueueEmpty:
-                        break
-
-                # Process entire batch at once (numpy vectorized)
-                audio_data = process_gemini_audio(bytes(batch))
-
-                # Send all chunks, single drain at end
+                # Send raw 24kHz audio - ESP32 handles conversion
+                logger.info(f"Sending {len(data)} bytes raw audio to device")
                 offset = 0
-                while offset < len(audio_data):
-                    chunk = audio_data[offset:offset + MAX_DEVICE_CHUNK]
+                while offset < len(data):
+                    chunk = data[offset:offset + MAX_DEVICE_CHUNK]
                     header = struct.pack('>I', len(chunk))
                     self.writer.write(header + chunk)
                     chunks_sent += 1
                     offset += MAX_DEVICE_CHUNK
                 await self.writer.drain()
-
-                if chunks_sent % 50 == 1:
-                    qsize = self.gemini_session.audio_in_queue.qsize()
-                    logger.info(f"Sent batch #{chunks_sent}: {len(batch)}B raw → {len(audio_data)}B out, queue: {qsize}")
+                logger.info(f"Sent {chunks_sent} chunks to device")
 
         except Exception as e:
             logger.error(f"Error sending to device: {e}", exc_info=True)
             self.active = False
         finally:
-            logger.info(f"send_to_device task ended, total chunks sent: {chunks_sent}")
+            logger.info(f"send_to_device ended, {chunks_sent} chunks")
 
     async def cleanup(self):
         """Clean up connection"""
