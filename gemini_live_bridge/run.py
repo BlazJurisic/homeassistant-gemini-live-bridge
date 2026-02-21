@@ -331,8 +331,7 @@ Ti: [pozovi end_conversation()] "Doviđenja!"
                     break
 
                 logger.debug(f"Sending {len(audio_data)} bytes to Gemini")
-                # Use the new API method instead of deprecated session.send
-                await self.session.send(input={"data": audio_data, "mime_type": "audio/pcm"})
+                await self.session.send_realtime_input(audio={"data": audio_data, "mime_type": "audio/pcm"})
             logger.debug("Exited send loop, session no longer active")
         except Exception as e:
             logger.error(f"Error sending audio to Gemini: {e}", exc_info=True)
@@ -635,11 +634,7 @@ async def main():
     logger.info(f"Session Timeout: {SESSION_TIMEOUT}s")
     logger.info(f"Home Assistant URL: {HA_URL}")
     logger.info(f"HA Token available: {'Yes' if HA_TOKEN else 'No'}")
-    logger.info(f"SUPERVISOR_TOKEN env: {'set' if os.environ.get('SUPERVISOR_TOKEN') else 'not set'}")
-    # Debug: list all env vars containing TOKEN or SUPERVISOR
-    for k, v in os.environ.items():
-        if 'TOKEN' in k.upper() or 'SUPERVISOR' in k.upper() or 'HASSIO' in k.upper():
-            logger.info(f"  ENV {k}={v[:20]}...")
+    logger.debug(f"SUPERVISOR_TOKEN env: {'set' if os.environ.get('SUPERVISOR_TOKEN') else 'from s6 file'}")
     logger.info("=" * 60)
 
     server = BridgeServer(SERVER_PORT)
