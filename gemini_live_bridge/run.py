@@ -57,7 +57,7 @@ else:
 
 # Audio configuration
 SEND_SAMPLE_RATE = 16000  # From ESP32 device
-RECEIVE_SAMPLE_RATE = 24000  # To ESP32 device
+RECEIVE_SAMPLE_RATE = 48000  # To ESP32 device (Gemini sends 24kHz, we upsample to 48kHz)
 CHANNELS = 1
 CHUNK_SIZE = 1024
 DEVICE_BITS_PER_SAMPLE = 32  # ESP32 I2S sends 32-bit samples
@@ -101,10 +101,10 @@ def convert_16bit_to_32bit(data: bytes) -> bytes:
     return samples_32.tobytes()
 
 
-def resample_24k_to_16k(data: bytes) -> bytes:
-    """Resample 16-bit PCM from 24kHz to 16kHz (ratio 3:2).
+def resample_24k_to_48k(data: bytes) -> bytes:
+    """Upsample 16-bit PCM from 24kHz to 48kHz (ratio 1:2).
 
-    Uses linear interpolation for smooth downsampling.
+    Uses linear interpolation to double the sample rate.
     """
     if len(data) % 2 != 0:
         return data
@@ -116,18 +116,17 @@ def resample_24k_to_16k(data: bytes) -> bytes:
     if n_in < 2:
         return data
 
-    # Output has 2/3 the number of samples
-    n_out = (n_in * 2) // 3
+    # Output has 2x the number of samples
+    n_out = n_in * 2
     output = array.array('h')
 
     for i in range(n_out):
         # Map output index to input position
-        pos = i * 1.5  # 3/2 ratio
+        pos = i * 0.5  # 24k/48k = 0.5
         idx = int(pos)
         frac = pos - idx
 
         if idx + 1 < n_in:
-            # Linear interpolation
             val = int(samples[idx] * (1 - frac) + samples[idx + 1] * frac)
         else:
             val = samples[min(idx, n_in - 1)]
@@ -135,6 +134,22 @@ def resample_24k_to_16k(data: bytes) -> bytes:
         output.append(max(-32768, min(32767, val)))
 
     return output.tobytes()
+
+
+def mono_to_stereo(data: bytes) -> bytes:
+    """Convert 16-bit mono PCM to interleaved stereo (duplicate each sample)."""
+    if len(data) % 2 != 0:
+        return data
+
+    samples = array.array('h')
+    samples.frombytes(data)
+
+    stereo = array.array('h')
+    for s in samples:
+        stereo.append(s)  # Left
+        stereo.append(s)  # Right
+
+    return stereo.tobytes()
 
 # Gemini configuration
 MODEL = "models/gemini-2.5-flash-native-audio-preview-09-2025"
@@ -630,8 +645,11 @@ class DeviceConnection:
                     except asyncio.TimeoutError:
                         continue
 
-                    # Resample 24kHz → 16kHz to match device speaker rate
-                    audio_data = resample_24k_to_16k(audio_data)
+                    # Resample 24kHz → 48kHz to match device speaker rate
+                    audio_data = resample_24k_to_48k(audio_data)
+
+                    # Convert mono to interleaved stereo
+                    audio_data = mono_to_stereo(audio_data)
 
                     # Convert 16-bit PCM to 32-bit I2S for device speaker
                     if DEVICE_BITS_PER_SAMPLE == 32:
