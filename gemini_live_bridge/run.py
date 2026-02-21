@@ -100,6 +100,42 @@ def convert_16bit_to_32bit(data: bytes) -> bytes:
 
     return samples_32.tobytes()
 
+
+def resample_24k_to_16k(data: bytes) -> bytes:
+    """Resample 16-bit PCM from 24kHz to 16kHz (ratio 3:2).
+
+    Uses linear interpolation for smooth downsampling.
+    """
+    if len(data) % 2 != 0:
+        return data
+
+    samples = array.array('h')
+    samples.frombytes(data)
+
+    n_in = len(samples)
+    if n_in < 2:
+        return data
+
+    # Output has 2/3 the number of samples
+    n_out = (n_in * 2) // 3
+    output = array.array('h')
+
+    for i in range(n_out):
+        # Map output index to input position
+        pos = i * 1.5  # 3/2 ratio
+        idx = int(pos)
+        frac = pos - idx
+
+        if idx + 1 < n_in:
+            # Linear interpolation
+            val = int(samples[idx] * (1 - frac) + samples[idx + 1] * frac)
+        else:
+            val = samples[min(idx, n_in - 1)]
+
+        output.append(max(-32768, min(32767, val)))
+
+    return output.tobytes()
+
 # Gemini configuration
 MODEL = "models/gemini-2.5-flash-native-audio-preview-09-2025"
 
@@ -594,7 +630,10 @@ class DeviceConnection:
                     except asyncio.TimeoutError:
                         continue
 
-                    # Convert 16-bit Gemini audio to 32-bit I2S for device speaker
+                    # Resample 24kHz → 16kHz to match device speaker rate
+                    audio_data = resample_24k_to_16k(audio_data)
+
+                    # Convert 16-bit PCM to 32-bit I2S for device speaker
                     if DEVICE_BITS_PER_SAMPLE == 32:
                         audio_data = convert_16bit_to_32bit(audio_data)
 
