@@ -364,19 +364,20 @@ Ti: [pozovi end_conversation()] "Doviđenja!"
                 if audio_data is None:
                     break
 
-                # Convert 32-bit I2S samples to 16-bit PCM for Gemini
+                # Convert 32-bit stereo I2S to 16-bit mono (ch0 = AEC processed)
+                raw_len = len(audio_data)
                 if DEVICE_BITS_PER_SAMPLE == 32:
                     audio_data = convert_32bit_to_16bit(audio_data)
 
                 await self.session.send_realtime_input(audio={"data": audio_data, "mime_type": "audio/pcm"})
                 chunks_to_gemini += 1
-                if chunks_to_gemini % 50 == 1:
+                if chunks_to_gemini % 25 == 1:
                     samples = array.array('h')
                     samples.frombytes(audio_data)
                     if samples:
                         peak = max(abs(s) for s in samples)
                         playing = "SPEAKER_ON" if self.playing else "speaker_off"
-                        logger.info(f"MIC #{chunks_to_gemini}: peak={peak} [{playing}]")
+                        logger.info(f"MIC #{chunks_to_gemini}: raw={raw_len}B→{len(audio_data)}B peak={peak} [{playing}]")
             logger.info("Exited send loop, session no longer active")
         except Exception as e:
             logger.error(f"Error sending audio to Gemini: {e}", exc_info=True)
