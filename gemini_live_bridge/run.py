@@ -10,6 +10,7 @@ import asyncio
 import json
 import logging
 import struct
+import array
 from typing import Optional, Dict, Any
 
 from google import genai
@@ -59,6 +60,45 @@ SEND_SAMPLE_RATE = 16000  # From ESP32 device
 RECEIVE_SAMPLE_RATE = 24000  # To ESP32 device
 CHANNELS = 1
 CHUNK_SIZE = 1024
+DEVICE_BITS_PER_SAMPLE = 32  # ESP32 I2S sends 32-bit samples
+
+
+def convert_32bit_to_16bit(data: bytes) -> bytes:
+    """Convert 32-bit LE PCM samples to 16-bit LE PCM.
+
+    I2S 32-bit frames have audio data left-justified (upper bits).
+    Extract the upper 16 bits of each 32-bit sample.
+    """
+    if len(data) % 4 != 0:
+        return data  # Not aligned, pass through
+
+    # Unpack as 32-bit signed LE, right-shift 16, repack as 16-bit signed LE
+    samples_32 = array.array('i')  # signed 32-bit
+    samples_32.frombytes(data)
+
+    samples_16 = array.array('h')  # signed 16-bit
+    for s in samples_32:
+        samples_16.append(max(-32768, min(32767, s >> 16)))
+
+    return samples_16.tobytes()
+
+
+def convert_16bit_to_32bit(data: bytes) -> bytes:
+    """Convert 16-bit LE PCM samples to 32-bit LE PCM for I2S output.
+
+    Left-justify 16-bit samples into 32-bit I2S frames.
+    """
+    if len(data) % 2 != 0:
+        return data  # Not aligned, pass through
+
+    samples_16 = array.array('h')  # signed 16-bit
+    samples_16.frombytes(data)
+
+    samples_32 = array.array('i')  # signed 32-bit
+    for s in samples_16:
+        samples_32.append(s << 16)
+
+    return samples_32.tobytes()
 
 # Gemini configuration
 MODEL = "models/gemini-2.5-flash-native-audio-preview-09-2025"
@@ -333,6 +373,10 @@ Ti: [pozovi end_conversation()] "Doviđenja!"
                 if audio_data is None:
                     break
 
+                # Convert 32-bit I2S samples to 16-bit PCM for Gemini
+                if DEVICE_BITS_PER_SAMPLE == 32:
+                    audio_data = convert_32bit_to_16bit(audio_data)
+
                 await self.session.send_realtime_input(audio={"data": audio_data, "mime_type": "audio/pcm"})
                 chunks_to_gemini += 1
                 if chunks_to_gemini % 100 == 1:
@@ -542,6 +586,10 @@ class DeviceConnection:
                         )
                     except asyncio.TimeoutError:
                         continue
+
+                    # Convert 16-bit Gemini audio to 32-bit I2S for device speaker
+                    if DEVICE_BITS_PER_SAMPLE == 32:
+                        audio_data = convert_16bit_to_32bit(audio_data)
 
                     # Send to device with length header
                     length = len(audio_data)
