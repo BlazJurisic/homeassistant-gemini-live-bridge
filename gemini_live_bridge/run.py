@@ -624,6 +624,10 @@ async def main():
     logger.info(f"Home Assistant URL: {HA_URL}")
     logger.info(f"HA Token available: {'Yes' if HA_TOKEN else 'No'}")
     logger.info(f"SUPERVISOR_TOKEN env: {'set' if os.environ.get('SUPERVISOR_TOKEN') else 'not set'}")
+    # Debug: list all env vars containing TOKEN or SUPERVISOR
+    for k, v in os.environ.items():
+        if 'TOKEN' in k.upper() or 'SUPERVISOR' in k.upper() or 'HASSIO' in k.upper():
+            logger.info(f"  ENV {k}={v[:20]}...")
     logger.info("=" * 60)
 
     server = BridgeServer(SERVER_PORT)
