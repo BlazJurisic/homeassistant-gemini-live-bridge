@@ -1,5 +1,5 @@
 name: Gemini Live Bridge
-version: "1.2.0"
+version: "1.2.1"
 slug: gemini_live_bridge
 description: Full-duplex voice assistant bridge using Gemini Live API
 arch:
@@ -12,7 +12,6 @@ init: false
 startup: application
 boot: auto
 homeassistant_api: true
-host_network: true
 ports:
   9872/tcp: 9872
 options:
