@@ -33,8 +33,14 @@ SESSION_TIMEOUT = int(config.get("session_timeout_seconds", 300))
 CROATIAN_PERSONALITY = config.get("croatian_personality", True)
 
 # Home Assistant connection
-HA_URL = os.environ.get("SUPERVISOR_TOKEN") and "http://supervisor/core" or "http://homeassistant.local:8123"
-HA_TOKEN = os.environ.get("SUPERVISOR_TOKEN") or os.environ.get("HA_TOKEN")
+# In HA add-on context, SUPERVISOR_TOKEN is available when homeassistant_api: true
+_supervisor_token = os.environ.get("SUPERVISOR_TOKEN", "")
+if _supervisor_token:
+    HA_URL = "http://supervisor/core"
+    HA_TOKEN = _supervisor_token
+else:
+    HA_URL = os.environ.get("HA_URL", "http://homeassistant.local:8123")
+    HA_TOKEN = os.environ.get("HA_TOKEN", "")
 
 # Audio configuration
 SEND_SAMPLE_RATE = 16000  # From ESP32 device
@@ -616,6 +622,8 @@ async def main():
     logger.info(f"Croatian Personality: {CROATIAN_PERSONALITY}")
     logger.info(f"Session Timeout: {SESSION_TIMEOUT}s")
     logger.info(f"Home Assistant URL: {HA_URL}")
+    logger.info(f"HA Token available: {'Yes' if HA_TOKEN else 'No'}")
+    logger.info(f"SUPERVISOR_TOKEN env: {'set' if os.environ.get('SUPERVISOR_TOKEN') else 'not set'}")
     logger.info("=" * 60)
 
     server = BridgeServer(SERVER_PORT)
