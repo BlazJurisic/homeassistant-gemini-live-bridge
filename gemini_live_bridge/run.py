@@ -576,33 +576,46 @@ class DeviceConnection:
         """Receive audio from Gemini and send to device"""
         logger.info("send_to_device task started")
         chunks_sent = 0
+        MAX_DEVICE_CHUNK = 4096
         try:
             while self.active:
-                # Get audio from Gemini
-                if self.gemini_session:
+                if not self.gemini_session:
+                    await asyncio.sleep(0.1)
+                    continue
+
+                # Batch collect: wait for one chunk, then grab ALL queued chunks
+                batch = bytearray()
+                try:
+                    data = await asyncio.wait_for(
+                        self.gemini_session.audio_in_queue.get(), timeout=1.0
+                    )
+                    batch.extend(data)
+                except asyncio.TimeoutError:
+                    continue
+
+                # Drain everything currently queued (non-blocking)
+                while not self.gemini_session.audio_in_queue.empty():
                     try:
-                        audio_data = await asyncio.wait_for(
-                            self.gemini_session.audio_in_queue.get(), timeout=1.0
-                        )
-                    except asyncio.TimeoutError:
-                        continue
+                        batch.extend(self.gemini_session.audio_in_queue.get_nowait())
+                    except asyncio.QueueEmpty:
+                        break
 
-                    # Convert: 16-bit mono → 32-bit stereo (no resampling)
-                    audio_data = process_gemini_audio(audio_data)
+                # Process entire batch at once (numpy vectorized)
+                audio_data = process_gemini_audio(bytes(batch))
 
-                    # Split into chunks and batch write (single drain)
-                    MAX_DEVICE_CHUNK = 8192
-                    offset = 0
-                    while offset < len(audio_data):
-                        chunk = audio_data[offset:offset + MAX_DEVICE_CHUNK]
-                        header = struct.pack('>I', len(chunk))
-                        self.writer.write(header + chunk)
-                        chunks_sent += 1
-                        offset += MAX_DEVICE_CHUNK
-                    await self.writer.drain()
+                # Send all chunks, single drain at end
+                offset = 0
+                while offset < len(audio_data):
+                    chunk = audio_data[offset:offset + MAX_DEVICE_CHUNK]
+                    header = struct.pack('>I', len(chunk))
+                    self.writer.write(header + chunk)
+                    chunks_sent += 1
+                    offset += MAX_DEVICE_CHUNK
+                await self.writer.drain()
 
-                    if chunks_sent % 10 == 1:
-                        logger.info(f"Sent chunk #{chunks_sent} to device: {len(audio_data)}B")
+                if chunks_sent % 50 == 1:
+                    qsize = self.gemini_session.audio_in_queue.qsize()
+                    logger.info(f"Sent batch #{chunks_sent}: {len(batch)}B raw → {len(audio_data)}B out, queue: {qsize}")
 
         except Exception as e:
             logger.error(f"Error sending to device: {e}", exc_info=True)
