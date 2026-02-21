@@ -10,6 +10,7 @@ import asyncio
 import json
 import logging
 import struct
+import socket
 import array
 from typing import Optional, Dict, Any
 
@@ -487,6 +488,12 @@ class DeviceConnection:
 
         try:
             self.active = True
+
+            # Enable TCP_NODELAY for low-latency audio streaming
+            sock = self.writer.transport.get_extra_info('socket')
+            if sock is not None:
+                sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+                logger.info("TCP_NODELAY enabled")
 
             # Create Gemini session
             try:
