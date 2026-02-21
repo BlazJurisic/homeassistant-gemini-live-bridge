@@ -4,7 +4,8 @@ FROM $BUILD_FROM
 # Install Python and dependencies
 RUN apk add --no-cache \
     python3 \
-    py3-pip
+    py3-pip \
+    py3-numpy
 
 # Copy requirements
 COPY requirements.txt /tmp/

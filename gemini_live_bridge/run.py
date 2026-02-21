@@ -13,6 +13,7 @@ import struct
 import array
 from typing import Optional, Dict, Any
 
+import numpy as np
 from google import genai
 from google.genai import types
 import aiohttp
@@ -64,50 +65,26 @@ DEVICE_BITS_PER_SAMPLE = 32  # ESP32 I2S sends 32-bit samples
 
 
 def convert_32bit_to_16bit(data: bytes) -> bytes:
-    """Convert 32-bit LE PCM samples to 16-bit LE PCM.
-
-    I2S 32-bit frames have audio data left-justified (upper bits).
-    Extract the upper 16 bits of each 32-bit sample.
-    """
+    """Convert 32-bit LE I2S samples to 16-bit LE PCM using numpy."""
     if len(data) % 4 != 0:
-        return data  # Not aligned, pass through
-
-    # Unpack as 32-bit signed LE, right-shift 16, repack as 16-bit signed LE
-    samples_32 = array.array('i')  # signed 32-bit
-    samples_32.frombytes(data)
-
-    samples_16 = array.array('h')  # signed 16-bit
-    for s in samples_32:
-        samples_16.append(max(-32768, min(32767, s >> 16)))
-
-    return samples_16.tobytes()
+        return data
+    return (np.frombuffer(data, dtype='<i4') >> 16).astype('<i2').tobytes()
 
 
 def process_gemini_audio(data: bytes) -> bytes:
-    """Convert Gemini 16-bit mono PCM to device 32-bit stereo I2S.
+    """Convert Gemini 24kHz 16-bit mono to device 48kHz 32-bit stereo.
 
-    NO resampling - passes through at original sample rate.
-    Each 2-byte input sample becomes 8 bytes output (2x 32-bit LE left-justified for L+R).
-    Operates at byte level for speed.
+    All numpy vectorized (C-speed):
+    - 2x nearest-neighbor upsample (24kHz -> 48kHz)
+    - mono to stereo (duplicate L=R)
+    - 16-bit to 32-bit left-justified for I2S
+    Each input sample becomes 4 output int32 values.
     """
-    n = len(data) // 2
-    if n < 1:
+    samples = np.frombuffer(data, dtype='<i2')
+    if len(samples) < 1:
         return data
-
-    # Pre-allocate: each 2-byte sample -> 8 bytes (2 x int32 for stereo L+R)
-    buf = bytearray(n * 8)
-    j = 0
-    for i in range(0, len(data), 2):
-        # 16-bit LE [lo, hi] -> 32-bit LE left-justified [0x00, 0x00, lo, hi]
-        lo = data[i]
-        hi = data[i + 1]
-        # Left channel
-        buf[j + 2] = lo; buf[j + 3] = hi
-        # Right channel (same)
-        buf[j + 6] = lo; buf[j + 7] = hi
-        j += 8
-
-    return bytes(buf)
+    # repeat 4x = 2x upsample * 2 channels, then left-justify to 32-bit
+    return (np.repeat(samples.astype(np.int32), 4) << 16).tobytes()
 
 # Gemini configuration
 MODEL = "models/gemini-2.5-flash-native-audio-preview-09-2025"
