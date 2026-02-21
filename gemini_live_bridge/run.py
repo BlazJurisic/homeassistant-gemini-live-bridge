@@ -70,6 +70,9 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+# Silence noisy websockets debug logging
+logging.getLogger("websockets").setLevel(logging.WARNING)
+
 
 class HomeAssistantClient:
     """Client for Home Assistant REST API"""
@@ -322,36 +325,39 @@ Ti: [pozovi end_conversation()] "Doviđenja!"
 
     async def send_audio_to_gemini(self):
         """Background task to send audio from device to Gemini"""
+        chunks_to_gemini = 0
         try:
-            logger.debug("Starting send_audio_to_gemini task")
+            logger.info("send_audio_to_gemini task started")
             while self.active:
-                logger.debug("Waiting for audio from device...")
                 audio_data = await self.audio_out_queue.get()
                 if audio_data is None:
                     break
 
-                logger.debug(f"Sending {len(audio_data)} bytes to Gemini")
                 await self.session.send_realtime_input(audio={"data": audio_data, "mime_type": "audio/pcm"})
-            logger.debug("Exited send loop, session no longer active")
+                chunks_to_gemini += 1
+                if chunks_to_gemini % 100 == 1:
+                    logger.info(f"Sent chunk #{chunks_to_gemini} to Gemini ({len(audio_data)} bytes)")
+            logger.info("Exited send loop, session no longer active")
         except Exception as e:
             logger.error(f"Error sending audio to Gemini: {e}", exc_info=True)
+        finally:
+            logger.info(f"send_audio_to_gemini ended, total chunks: {chunks_to_gemini}")
 
     async def receive_audio_from_gemini(self):
         """Background task to receive audio and function calls from Gemini"""
-        logger.info("receive_audio_from_gemini() ENTERED")  # Outside try block
+        chunks_from_gemini = 0
         try:
-            logger.debug("Starting receive_audio_from_gemini task")
+            logger.info("receive_audio_from_gemini task started")
             while self.active:
-                logger.debug("Waiting for turn from Gemini...")
+                logger.info("Waiting for Gemini turn...")
                 turn = self.session.receive()
-                logger.debug(f"Got turn object: {type(turn)}")
 
                 async for response in turn:
-                    logger.debug(f"Got response from turn: {response}")
-
                     # Handle audio data
                     if data := response.data:
-                        logger.info(f"Received audio data: {len(data)} bytes")
+                        chunks_from_gemini += 1
+                        if chunks_from_gemini % 10 == 1:
+                            logger.info(f"Gemini audio chunk #{chunks_from_gemini}: {len(data)} bytes, queue size: {self.audio_in_queue.qsize()}")
                         await self.audio_in_queue.put(data)
                         continue
 
@@ -380,44 +386,31 @@ Ti: [pozovi end_conversation()] "Doviđenja!"
                                 self.active = False
                                 return
 
-                logger.debug(f"Turn complete, audio_in_queue size: {self.audio_in_queue.qsize()}")
-                # NOTE: Do NOT clear audio queue here - send_to_device needs to drain it
-                # Queue is only cleared when a new turn starts (interruption)
+                logger.info(f"Turn complete, audio_in_queue size: {self.audio_in_queue.qsize()}, total Gemini chunks: {chunks_from_gemini}")
 
-            logger.debug("Exited receive loop, session no longer active")
+            logger.info("Exited receive loop, session no longer active")
         except Exception as e:
             logger.error(f"Error receiving from Gemini: {e}", exc_info=True)
+        finally:
+            logger.info(f"receive_audio_from_gemini ended, total chunks: {chunks_from_gemini}")
 
     async def start(self):
         """Start the Gemini session"""
         logger.info(f"Starting Gemini session {self.session_id}")
-        logger.debug(f"Model: {MODEL}")
-        logger.debug(f"API Key configured: {'Yes' if GEMINI_API_KEY else 'No'}")
 
         self.active = True
 
         try:
-            logger.debug("Connecting to Gemini Live API...")
             async with (
                 self.client.aio.live.connect(model=MODEL, config=self.config) as session,
                 asyncio.TaskGroup() as tg,
             ):
-                logger.info("Successfully connected to Gemini Live API")
+                logger.info("Connected to Gemini Live API")
                 self.session = session
 
-                # Start background tasks
-                logger.debug("Creating send_audio_to_gemini task...")
-                send_task = tg.create_task(self.send_audio_to_gemini())
-                logger.debug(f"Send task created: {send_task}")
-
-                logger.debug("Creating receive_audio_from_gemini task...")
-                receive_task = tg.create_task(self.receive_audio_from_gemini())
-                logger.debug(f"Receive task created: {receive_task}")
-
-                # Force yield to allow both tasks to start
-                logger.debug("Yielding control to allow tasks to start...")
+                tg.create_task(self.send_audio_to_gemini())
+                tg.create_task(self.receive_audio_from_gemini())
                 await asyncio.sleep(0)
-                logger.debug("Back from yield, checking task status...")
 
                 # Wait until session ends
                 while self.active:
@@ -459,15 +452,12 @@ class DeviceConnection:
             self.active = True
 
             # Create Gemini session
-            logger.debug(f"Creating Gemini session for {self.session_id}")
             try:
                 self.gemini_session = GeminiSession(self.ha_client, self.session_id)
-                logger.debug(f"Gemini session created successfully")
+                logger.info(f"Gemini session created for {self.session_id}")
             except Exception as e:
                 logger.error(f"Failed to create Gemini session: {e}", exc_info=True)
                 raise
-
-            logger.debug(f"Starting session tasks...")
 
             # Mark session as active before starting tasks
             self.gemini_session.active = True
@@ -475,16 +465,11 @@ class DeviceConnection:
             # Start tasks
             try:
                 async with asyncio.TaskGroup() as tg:
-                    logger.debug("Creating receive_from_device task")
                     tg.create_task(self.receive_from_device())
-
-                    logger.debug("Creating send_to_device task")
                     tg.create_task(self.send_to_device())
-
-                    logger.debug("Creating gemini_session.start task")
                     tg.create_task(self.gemini_session.start())
 
-                    logger.debug("All tasks created, waiting for session")
+                    logger.info("All session tasks started")
 
                     # Give tasks time to start
                     await asyncio.sleep(0.1)
@@ -513,7 +498,9 @@ class DeviceConnection:
 
     async def receive_from_device(self):
         """Receive audio from device and send to Gemini"""
+        chunks_from_device = 0
         try:
+            logger.info("receive_from_device task started")
             while self.active:
                 # Read length header (4 bytes)
                 length_data = await self.reader.readexactly(4)
@@ -526,6 +513,7 @@ class DeviceConnection:
 
                 # Read audio data
                 audio_data = await self.reader.readexactly(length)
+                chunks_from_device += 1
 
                 # Send to Gemini
                 if self.gemini_session:
@@ -537,6 +525,8 @@ class DeviceConnection:
         except Exception as e:
             logger.error(f"Error receiving from device: {e}", exc_info=True)
             self.active = False
+        finally:
+            logger.info(f"receive_from_device ended, total chunks: {chunks_from_device}")
 
     async def send_to_device(self):
         """Receive audio from Gemini and send to device"""
