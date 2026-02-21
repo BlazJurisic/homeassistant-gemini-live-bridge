@@ -83,73 +83,31 @@ def convert_32bit_to_16bit(data: bytes) -> bytes:
     return samples_16.tobytes()
 
 
-def convert_16bit_to_32bit(data: bytes) -> bytes:
-    """Convert 16-bit LE PCM samples to 32-bit LE PCM for I2S output.
+def process_gemini_audio(data: bytes) -> bytes:
+    """Convert Gemini 16-bit mono PCM to device 32-bit stereo I2S.
 
-    Left-justify 16-bit samples into 32-bit I2S frames.
+    NO resampling - passes through at original sample rate.
+    Each 2-byte input sample becomes 8 bytes output (2x 32-bit LE left-justified for L+R).
+    Operates at byte level for speed.
     """
-    if len(data) % 2 != 0:
-        return data  # Not aligned, pass through
-
-    samples_16 = array.array('h')  # signed 16-bit
-    samples_16.frombytes(data)
-
-    samples_32 = array.array('i')  # signed 32-bit
-    for s in samples_16:
-        samples_32.append(s << 16)
-
-    return samples_32.tobytes()
-
-
-def resample_24k_to_48k(data: bytes) -> bytes:
-    """Upsample 16-bit PCM from 24kHz to 48kHz (ratio 1:2).
-
-    Uses linear interpolation to double the sample rate.
-    """
-    if len(data) % 2 != 0:
+    n = len(data) // 2
+    if n < 1:
         return data
 
-    samples = array.array('h')
-    samples.frombytes(data)
+    # Pre-allocate: each 2-byte sample -> 8 bytes (2 x int32 for stereo L+R)
+    buf = bytearray(n * 8)
+    j = 0
+    for i in range(0, len(data), 2):
+        # 16-bit LE [lo, hi] -> 32-bit LE left-justified [0x00, 0x00, lo, hi]
+        lo = data[i]
+        hi = data[i + 1]
+        # Left channel
+        buf[j + 2] = lo; buf[j + 3] = hi
+        # Right channel (same)
+        buf[j + 6] = lo; buf[j + 7] = hi
+        j += 8
 
-    n_in = len(samples)
-    if n_in < 2:
-        return data
-
-    # Output has 2x the number of samples
-    n_out = n_in * 2
-    output = array.array('h')
-
-    for i in range(n_out):
-        # Map output index to input position
-        pos = i * 0.5  # 24k/48k = 0.5
-        idx = int(pos)
-        frac = pos - idx
-
-        if idx + 1 < n_in:
-            val = int(samples[idx] * (1 - frac) + samples[idx + 1] * frac)
-        else:
-            val = samples[min(idx, n_in - 1)]
-
-        output.append(max(-32768, min(32767, val)))
-
-    return output.tobytes()
-
-
-def mono_to_stereo(data: bytes) -> bytes:
-    """Convert 16-bit mono PCM to interleaved stereo (duplicate each sample)."""
-    if len(data) % 2 != 0:
-        return data
-
-    samples = array.array('h')
-    samples.frombytes(data)
-
-    stereo = array.array('h')
-    for s in samples:
-        stereo.append(s)  # Left
-        stereo.append(s)  # Right
-
-    return stereo.tobytes()
+    return bytes(buf)
 
 # Gemini configuration
 MODEL = "models/gemini-2.5-flash-native-audio-preview-09-2025"
@@ -645,31 +603,22 @@ class DeviceConnection:
                     except asyncio.TimeoutError:
                         continue
 
-                    # Resample 24kHz → 48kHz to match device speaker rate
-                    audio_data = resample_24k_to_48k(audio_data)
+                    # Convert: 16-bit mono → 32-bit stereo (no resampling)
+                    audio_data = process_gemini_audio(audio_data)
 
-                    # Convert mono to interleaved stereo
-                    audio_data = mono_to_stereo(audio_data)
-
-                    # Convert 16-bit PCM to 32-bit I2S for device speaker
-                    if DEVICE_BITS_PER_SAMPLE == 32:
-                        audio_data = convert_16bit_to_32bit(audio_data)
-
-                    # Split into chunks that fit ESP32 speaker buffer (max 3840 bytes)
+                    # Split into chunks and batch write (single drain)
                     MAX_DEVICE_CHUNK = 3840
                     offset = 0
                     while offset < len(audio_data):
                         chunk = audio_data[offset:offset + MAX_DEVICE_CHUNK]
-                        length = len(chunk)
-                        header = struct.pack('>I', length)
-
+                        header = struct.pack('>I', len(chunk))
                         self.writer.write(header + chunk)
-                        await self.writer.drain()
                         chunks_sent += 1
                         offset += MAX_DEVICE_CHUNK
+                    await self.writer.drain()
 
                     if chunks_sent % 10 == 1:
-                        logger.info(f"Sent audio chunk #{chunks_sent} to device: {len(audio_data)} bytes total")
+                        logger.info(f"Sent chunk #{chunks_sent} to device: {len(audio_data)}B")
 
         except Exception as e:
             logger.error(f"Error sending to device: {e}", exc_info=True)
