@@ -380,7 +380,11 @@ Ti: [pozovi end_conversation()] "Doviđenja!"
                 await self.session.send_realtime_input(audio={"data": audio_data, "mime_type": "audio/pcm"})
                 chunks_to_gemini += 1
                 if chunks_to_gemini % 100 == 1:
-                    logger.info(f"Sent chunk #{chunks_to_gemini} to Gemini ({len(audio_data)} bytes)")
+                    # Log audio level for debugging
+                    samples = array.array('h')
+                    samples.frombytes(audio_data)
+                    max_val = max(abs(s) for s in samples) if samples else 0
+                    logger.info(f"Sent chunk #{chunks_to_gemini} to Gemini ({len(audio_data)} bytes, peak={max_val})")
             logger.info("Exited send loop, session no longer active")
         except Exception as e:
             logger.error(f"Error sending audio to Gemini: {e}", exc_info=True)
