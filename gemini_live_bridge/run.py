@@ -66,10 +66,13 @@ DEVICE_BITS_PER_SAMPLE = 32  # ESP32 I2S sends 32-bit samples
 
 
 def convert_32bit_to_16bit(data: bytes) -> bytes:
-    """Convert 32-bit LE I2S samples to 16-bit LE PCM using numpy."""
+    """Convert 32-bit stereo I2S to 16-bit mono PCM (channel 0 only = XMOS AEC processed)."""
     if len(data) % 4 != 0:
         return data
-    return (np.frombuffer(data, dtype='<i4') >> 16).astype('<i2').tobytes()
+    samples_32 = np.frombuffer(data, dtype='<i4')
+    # Extract channel 0 only (even indices) - this is the XMOS AEC-processed channel
+    mono = samples_32[0::2] if len(samples_32) >= 2 else samples_32
+    return (mono >> 16).astype('<i2').tobytes()
 
 
 def process_gemini_audio(data: bytes) -> bytes:
