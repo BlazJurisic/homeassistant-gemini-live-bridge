@@ -367,15 +367,13 @@ Ti: [pozovi end_conversation()] "Doviđenja!"
 
                 await self.session.send_realtime_input(audio={"data": audio_data, "mime_type": "audio/pcm"})
                 chunks_to_gemini += 1
-                if chunks_to_gemini % 100 == 1:
-                    # Log audio stats for debugging
+                if chunks_to_gemini % 50 == 1:
                     samples = array.array('h')
                     samples.frombytes(audio_data)
                     if samples:
                         peak = max(abs(s) for s in samples)
-                        mean = sum(samples) // len(samples)
-                        # Show first few raw 32-bit values from pre-conversion data
-                        logger.info(f"Chunk #{chunks_to_gemini}: {len(audio_data)}B, peak={peak}, mean={mean}, samples[0:4]={list(samples[:4])}")
+                        playing = "SPEAKER_ON" if self.playing else "speaker_off"
+                        logger.info(f"MIC #{chunks_to_gemini}: peak={peak} [{playing}]")
             logger.info("Exited send loop, session no longer active")
         except Exception as e:
             logger.error(f"Error sending audio to Gemini: {e}", exc_info=True)
@@ -592,7 +590,10 @@ class DeviceConnection:
                         self.gemini_session.audio_in_queue.get(), timeout=1.0
                     )
                 except asyncio.TimeoutError:
+                    self.gemini_session.playing = False
                     continue
+
+                self.gemini_session.playing = True
 
                 # Calculate how long this chunk represents in real-time
                 # 24kHz 16-bit mono = 2 bytes per sample = 48000 bytes/sec
@@ -607,6 +608,10 @@ class DeviceConnection:
 
                 # THE CLOCK: sleep for the audio duration (real-time pacing)
                 await asyncio.sleep(chunk_duration)
+
+                # Mark not playing when queue is empty
+                if self.gemini_session.audio_in_queue.empty():
+                    self.gemini_session.playing = False
 
                 if chunks_sent % 20 == 1:
                     qsize = self.gemini_session.audio_in_queue.qsize()
