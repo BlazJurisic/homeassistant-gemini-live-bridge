@@ -380,13 +380,9 @@ Ti: [pozovi end_conversation()] "Doviđenja!"
                                 self.active = False
                                 return
 
-                logger.debug("Turn complete")
-                # Handle interruptions: clear audio queue
-                while not self.audio_in_queue.empty():
-                    try:
-                        self.audio_in_queue.get_nowait()
-                    except asyncio.QueueEmpty:
-                        break
+                logger.debug(f"Turn complete, audio_in_queue size: {self.audio_in_queue.qsize()}")
+                # NOTE: Do NOT clear audio queue here - send_to_device needs to drain it
+                # Queue is only cleared when a new turn starts (interruption)
 
             logger.debug("Exited receive loop, session no longer active")
         except Exception as e:
@@ -544,11 +540,18 @@ class DeviceConnection:
 
     async def send_to_device(self):
         """Receive audio from Gemini and send to device"""
+        logger.info("send_to_device task started")
+        chunks_sent = 0
         try:
             while self.active:
                 # Get audio from Gemini
                 if self.gemini_session:
-                    audio_data = await self.gemini_session.audio_in_queue.get()
+                    try:
+                        audio_data = await asyncio.wait_for(
+                            self.gemini_session.audio_in_queue.get(), timeout=1.0
+                        )
+                    except asyncio.TimeoutError:
+                        continue
 
                     # Send to device with length header
                     length = len(audio_data)
@@ -556,10 +559,16 @@ class DeviceConnection:
 
                     self.writer.write(header + audio_data)
                     await self.writer.drain()
+                    chunks_sent += 1
+
+                    if chunks_sent % 10 == 1:
+                        logger.info(f"Sent audio chunk #{chunks_sent} to device: {length} bytes")
 
         except Exception as e:
             logger.error(f"Error sending to device: {e}", exc_info=True)
             self.active = False
+        finally:
+            logger.info(f"send_to_device task ended, total chunks sent: {chunks_sent}")
 
     async def cleanup(self):
         """Clean up connection"""
