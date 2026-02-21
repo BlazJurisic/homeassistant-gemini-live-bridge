@@ -391,12 +391,10 @@ Ti: [pozovi end_conversation()] "Doviđenja!"
                 turn = self.session.receive()
 
                 async for response in turn:
-                    # Handle audio data - stream immediately for low latency
+                    # Handle audio data - queue immediately (like Google example)
                     if data := response.data:
                         chunks_from_gemini += 1
-                        if chunks_from_gemini % 10 == 1:
-                            logger.info(f"Gemini audio chunk #{chunks_from_gemini}: {len(data)} bytes")
-                        await self.audio_in_queue.put(data)
+                        self.audio_in_queue.put_nowait(data)
                         continue
 
                     # Handle text (for debugging)
@@ -409,7 +407,6 @@ Ti: [pozovi end_conversation()] "Doviđenja!"
                         for function_call in response.tool_call.function_calls:
                             result = await self.handle_function_call(function_call)
 
-                            # Send function response back to Gemini
                             await self.session.send_tool_response(
                                 function_responses=[
                                     types.FunctionResponse(
@@ -419,12 +416,20 @@ Ti: [pozovi end_conversation()] "Doviđenja!"
                                 ]
                             )
 
-                            # Check if conversation should end
                             if function_call.name == "end_conversation":
                                 self.active = False
                                 return
 
-                logger.info(f"Turn complete, total Gemini chunks: {chunks_from_gemini}")
+                # Turn complete - flush queue for interruption support
+                # (same as Google example: user can interrupt, old audio is discarded)
+                flushed = 0
+                while not self.audio_in_queue.empty():
+                    try:
+                        self.audio_in_queue.get_nowait()
+                        flushed += 1
+                    except asyncio.QueueEmpty:
+                        break
+                logger.info(f"Turn complete, {chunks_from_gemini} Gemini chunks, flushed {flushed} unplayed")
 
             logger.info("Exited receive loop, session no longer active")
         except Exception as e:
@@ -573,10 +578,14 @@ class DeviceConnection:
             logger.info(f"receive_from_device ended, total chunks: {chunks_from_device}")
 
     async def send_to_device(self):
-        """Send raw 24kHz 16-bit mono audio to device. ESP32 converts locally."""
+        """Send raw 24kHz audio paced at real-time (like PyAudio stream.write).
+
+        This is THE CLOCK - it paces audio delivery at exactly real-time speed.
+        The queue absorbs Gemini's bursts, and we drain it steadily.
+        """
         logger.info("send_to_device task started")
         chunks_sent = 0
-        MAX_DEVICE_CHUNK = 1024
+        bytes_sent = 0
         try:
             while self.active:
                 if not self.gemini_session:
@@ -590,23 +599,29 @@ class DeviceConnection:
                 except asyncio.TimeoutError:
                     continue
 
-                # Send raw 24kHz audio - ESP32 handles conversion
-                logger.info(f"Sending {len(data)} bytes raw audio to device")
-                offset = 0
-                while offset < len(data):
-                    chunk = data[offset:offset + MAX_DEVICE_CHUNK]
-                    header = struct.pack('>I', len(chunk))
-                    self.writer.write(header + chunk)
-                    chunks_sent += 1
-                    offset += MAX_DEVICE_CHUNK
+                # Calculate how long this chunk represents in real-time
+                # 24kHz 16-bit mono = 2 bytes per sample = 48000 bytes/sec
+                chunk_duration = len(data) / 48000.0
+
+                # Send entire Gemini chunk as one TCP message
+                header = struct.pack('>I', len(data))
+                self.writer.write(header + data)
                 await self.writer.drain()
-                logger.info(f"Sent {chunks_sent} chunks to device")
+                chunks_sent += 1
+                bytes_sent += len(data)
+
+                # THE CLOCK: sleep for the audio duration (real-time pacing)
+                await asyncio.sleep(chunk_duration)
+
+                if chunks_sent % 20 == 1:
+                    qsize = self.gemini_session.audio_in_queue.qsize()
+                    logger.info(f"Chunk #{chunks_sent}: {len(data)}B ({chunk_duration*1000:.0f}ms), queue: {qsize}, total: {bytes_sent}B")
 
         except Exception as e:
             logger.error(f"Error sending to device: {e}", exc_info=True)
             self.active = False
         finally:
-            logger.info(f"send_to_device ended, {chunks_sent} chunks")
+            logger.info(f"send_to_device ended, {chunks_sent} chunks, {bytes_sent}B")
 
     async def cleanup(self):
         """Clean up connection"""
