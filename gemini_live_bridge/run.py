@@ -33,8 +33,20 @@ SESSION_TIMEOUT = int(config.get("session_timeout_seconds", 300))
 CROATIAN_PERSONALITY = config.get("croatian_personality", True)
 
 # Home Assistant connection
-# In HA add-on context, SUPERVISOR_TOKEN is available when homeassistant_api: true
+# In HA add-on context, SUPERVISOR_TOKEN may be env var or file
 _supervisor_token = os.environ.get("SUPERVISOR_TOKEN", "")
+if not _supervisor_token:
+    # Try reading from s6 container environment
+    for token_path in [
+        "/run/s6/container_environment/SUPERVISOR_TOKEN",
+        "/var/run/s6/container_environment/SUPERVISOR_TOKEN",
+    ]:
+        if os.path.exists(token_path):
+            with open(token_path) as f:
+                _supervisor_token = f.read().strip()
+            if _supervisor_token:
+                break
+
 if _supervisor_token:
     HA_URL = "http://supervisor/core"
     HA_TOKEN = _supervisor_token
