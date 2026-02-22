@@ -139,6 +139,8 @@ logger = logging.getLogger(__name__)
 # Silence noisy websockets debug logging
 logging.getLogger("websockets").setLevel(logging.WARNING)
 
+logger.info("speexdsp available: %s", HAS_SPEEXDSP)
+
 
 class HomeAssistantClient:
     """Client for Home Assistant REST API"""
@@ -227,6 +229,7 @@ class GeminiSession:
                 _speex_lib.speex_echo_ctl(self._aec_state, 24, ctypes.byref(rate))
                 # Pre-allocate output buffer
                 self._aec_out_buf = (c_int16 * self.aec_frame_size)()
+                print(f"AEC initialized: frame={self.aec_frame_size} filter=4800 rate={SEND_SAMPLE_RATE}", flush=True)
                 logger.info("AEC initialized (ctypes): frame=%d, filter=4800, rate=%d",
                             self.aec_frame_size, SEND_SAMPLE_RATE)
             except Exception as e:
