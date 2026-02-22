@@ -602,13 +602,16 @@ class DeviceConnection:
 
                 self.gemini_session.playing = True
 
-                # Send immediately - no pacing sleep
-                # ESP32 has 2-second speaker buffer that absorbs bursts
+                # THE CLOCK: pace at 60% real-time (like PyAudio stream.write)
+                chunk_duration = len(data) / 48000.0 * 0.6
+
                 header = struct.pack('>I', len(data))
                 self.writer.write(header + data)
                 await self.writer.drain()
                 chunks_sent += 1
                 bytes_sent += len(data)
+
+                await asyncio.sleep(chunk_duration)
 
                 # Mark not playing when queue is empty
                 if self.gemini_session.audio_in_queue.empty():
