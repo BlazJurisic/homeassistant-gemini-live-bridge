@@ -616,7 +616,7 @@ class DeviceConnection:
 
                 if chunks_sent % 20 == 1:
                     qsize = self.gemini_session.audio_in_queue.qsize()
-                    logger.info(f"Chunk #{chunks_sent}: {len(data)}B ({chunk_duration*1000:.0f}ms), queue: {qsize}, total: {bytes_sent}B")
+                    logger.info(f"Chunk #{chunks_sent}: {len(data)}B, queue: {qsize}, total: {bytes_sent}B")
 
         except Exception as e:
             logger.error(f"Error sending to device: {e}", exc_info=True)
