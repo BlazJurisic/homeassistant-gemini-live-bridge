@@ -599,9 +599,10 @@ class DeviceConnection:
 
                 self.gemini_session.playing = True
 
-                # Calculate how long this chunk represents in real-time
+                # Send slightly faster than real-time (80%) to keep speaker buffer full
+                # This prevents crackling from asyncio.sleep() imprecision
                 # 24kHz 16-bit mono = 2 bytes per sample = 48000 bytes/sec
-                chunk_duration = len(data) / 48000.0
+                chunk_duration = len(data) / 48000.0 * 0.8
 
                 # Send entire Gemini chunk as one TCP message
                 header = struct.pack('>I', len(data))
