@@ -71,10 +71,8 @@ def convert_32bit_to_16bit(data: bytes) -> bytes:
     if len(data) % 4 != 0:
         return data
     all_samples = np.frombuffer(data, dtype='<i4')
-    ch0 = all_samples[0::2]  # left
-    ch1 = all_samples[1::2]  # right
-    # Try channel 1 (right) - might be the AEC-processed one
-    return (ch1 >> 16).astype('<i2').tobytes()
+    ch0 = all_samples[0::2]  # left = XMOS AEC processed (confirmed: R is silent)
+    return (ch0 >> 16).astype('<i2').tobytes()
 
 
 def process_gemini_audio(data: bytes) -> bytes:
