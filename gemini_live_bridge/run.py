@@ -22,8 +22,10 @@ import aiohttp
 try:
     from speexdsp import EchoCanceller
     HAS_SPEEXDSP = True
-except ImportError:
+except Exception as _speex_err:
     HAS_SPEEXDSP = False
+    # Log at startup (before logger is configured, use print)
+    print(f"speexdsp import failed: {_speex_err}", flush=True)
 
 # Configuration from add-on options
 CONFIG_PATH = "/data/options.json"
