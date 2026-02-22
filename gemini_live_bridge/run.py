@@ -446,8 +446,9 @@ Ti: [pozovi end_conversation()] "Doviđenja!"
             pos += frame_bytes
 
     def _apply_aec(self, mic_data: bytes) -> bytes:
-        """Apply echo cancellation using speex async capture API."""
-        if self._aec_state is None:
+        """Apply echo cancellation using speex async capture API.
+        Only active when speaker is playing - no echo to cancel when silent."""
+        if self._aec_state is None or not self.playing:
             return mic_data
 
         frame_bytes = self.aec_frame_size * 2  # 16-bit = 2 bytes/sample
