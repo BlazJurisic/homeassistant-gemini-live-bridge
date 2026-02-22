@@ -603,7 +603,7 @@ class DeviceConnection:
                 self.gemini_session.playing = True
 
                 # THE CLOCK: pace at 60% real-time (like PyAudio stream.write)
-                chunk_duration = len(data) / 48000.0 * 0.6
+                chunk_duration = len(data) / 48000.0 * 0.9
 
                 header = struct.pack('>I', len(data))
                 self.writer.write(header + data)
