@@ -19,6 +19,12 @@ from google import genai
 from google.genai import types
 import aiohttp
 
+try:
+    from speexdsp import EchoCanceller
+    HAS_SPEEXDSP = True
+except ImportError:
+    HAS_SPEEXDSP = False
+
 # Configuration from add-on options
 CONFIG_PATH = "/data/options.json"
 
@@ -174,7 +180,25 @@ class GeminiSession:
         self.audio_out_queue = asyncio.Queue(maxsize=50)
         self.session = None
         self.active = False
-        self.playing = False  # True while sending audio to speaker (mute mic)
+        self.playing = False  # True while sending audio to speaker
+
+        # Echo cancellation
+        self.speaker_ref_buffer = bytearray()
+        self.aec_frame_size = 256  # samples (16ms at 16kHz)
+        self.echo_canceller = None
+        if HAS_SPEEXDSP:
+            try:
+                self.echo_canceller = EchoCanceller(
+                    frame_size=self.aec_frame_size,
+                    filter_length=4800,  # 300ms echo tail at 16kHz
+                    sample_rate=SEND_SAMPLE_RATE
+                )
+                logger.info("AEC initialized: frame=%d, filter=4800, rate=%d",
+                            self.aec_frame_size, SEND_SAMPLE_RATE)
+            except Exception as e:
+                logger.warning("Failed to initialize AEC: %s", e)
+        else:
+            logger.warning("speexdsp not available - echo cancellation disabled")
 
         # System instructions
         if CROATIAN_PERSONALITY:
@@ -354,6 +378,58 @@ Ti: [pozovi end_conversation()] "Doviđenja!"
         self.active = False
         return {"success": True, "message": "Conversation ended"}
 
+    def add_speaker_reference(self, data_24khz: bytes):
+        """Store 24kHz speaker audio downsampled to 16kHz as AEC reference."""
+        if self.echo_canceller is None:
+            return
+        samples = np.frombuffer(data_24khz, dtype='<i2')
+        if len(samples) < 3:
+            return
+        # Downsample 24kHz -> 16kHz (ratio 2:3)
+        n_out = len(samples) * 2 // 3
+        if n_out < 1:
+            return
+        indices = np.linspace(0, len(samples) - 1, n_out)
+        resampled = np.interp(indices, np.arange(len(samples)), samples.astype(np.float64))
+        self.speaker_ref_buffer.extend(
+            np.clip(resampled, -32768, 32767).astype('<i2').tobytes()
+        )
+        # Cap at 1 second of reference (16kHz * 2 bytes = 32KB)
+        max_bytes = SEND_SAMPLE_RATE * 2
+        if len(self.speaker_ref_buffer) > max_bytes:
+            self.speaker_ref_buffer = self.speaker_ref_buffer[-max_bytes:]
+
+    def _apply_aec(self, mic_data: bytes) -> bytes:
+        """Apply echo cancellation to mic data using speaker reference."""
+        if self.echo_canceller is None:
+            return mic_data
+
+        frame_bytes = self.aec_frame_size * 2  # 16-bit = 2 bytes/sample
+        result = bytearray()
+        pos = 0
+
+        while pos + frame_bytes <= len(mic_data):
+            mic_frame = mic_data[pos:pos + frame_bytes]
+
+            if len(self.speaker_ref_buffer) >= frame_bytes:
+                ref_frame = bytes(self.speaker_ref_buffer[:frame_bytes])
+                del self.speaker_ref_buffer[:frame_bytes]
+            else:
+                ref_frame = b'\x00' * frame_bytes
+
+            try:
+                cleaned = self.echo_canceller.process(mic_frame, ref_frame)
+                result.extend(cleaned)
+            except Exception:
+                result.extend(mic_frame)
+            pos += frame_bytes
+
+        # Append any remaining bytes (less than a full frame)
+        if pos < len(mic_data):
+            result.extend(mic_data[pos:])
+
+        return bytes(result)
+
     async def send_audio_to_gemini(self):
         """Background task to send audio from device to Gemini"""
         chunks_to_gemini = 0
@@ -368,6 +444,9 @@ Ti: [pozovi end_conversation()] "Doviđenja!"
                 raw_audio = audio_data  # save for logging
                 if DEVICE_BITS_PER_SAMPLE == 32:
                     audio_data = convert_32bit_to_16bit(audio_data)
+
+                # Apply echo cancellation before sending to Gemini
+                audio_data = self._apply_aec(audio_data)
 
                 # Log both channels to compare AEC effectiveness
                 chunks_to_gemini += 1
@@ -402,6 +481,21 @@ Ti: [pozovi end_conversation()] "Doviđenja!"
                         self.audio_in_queue.put_nowait(data)
                         continue
 
+                    # Handle interruption from Gemini (user spoke over response)
+                    sc = getattr(response, 'server_content', None)
+                    if sc and getattr(sc, 'interrupted', False):
+                        cleared = 0
+                        while not self.audio_in_queue.empty():
+                            try:
+                                self.audio_in_queue.get_nowait()
+                                cleared += 1
+                            except asyncio.QueueEmpty:
+                                break
+                        self.playing = False
+                        # Clear AEC reference buffer too - old reference is stale
+                        self.speaker_ref_buffer.clear()
+                        logger.info(f"Gemini interrupted, cleared {cleared} queued chunks")
+
                     # Handle text (for debugging)
                     if text := response.text:
                         logger.info(f"Gemini text: {text}")
@@ -426,9 +520,8 @@ Ti: [pozovi end_conversation()] "Doviđenja!"
                                 self.active = False
                                 return
 
-                # Turn complete - do NOT flush queue
-                # XMOS echo cancellation should prevent self-interruption
-                # but if it doesn't, flushing would discard valid audio
+                # Turn complete - don't flush queue (remaining audio still playing)
+                # Bridge-side AEC + interruption handling above prevent self-interruption
                 logger.info(f"Turn complete, {chunks_from_gemini} Gemini chunks, queue: {self.audio_in_queue.qsize()}")
 
             logger.info("Exited receive loop, session no longer active")
@@ -601,6 +694,9 @@ class DeviceConnection:
                     continue
 
                 self.gemini_session.playing = True
+
+                # Store speaker reference for AEC before sending to device
+                self.gemini_session.add_speaker_reference(data)
 
                 # Send entire Gemini chunk as one message (no splitting)
                 # This ensures continuous audio with no gaps
