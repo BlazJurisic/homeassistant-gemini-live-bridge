@@ -19,45 +19,6 @@ from google import genai
 from google.genai import types
 import aiohttp
 
-# Speex echo canceller via ctypes (no pip package needed, just libspeexdsp.so)
-import ctypes
-import ctypes.util
-from ctypes import c_int, c_void_p, POINTER, c_int16, c_int32
-
-HAS_SPEEXDSP = False
-try:
-    _speex_lib = None
-    for _name in ["libspeexdsp.so.1", "libspeexdsp.so", "speexdsp"]:
-        try:
-            _speex_lib = ctypes.CDLL(_name)
-            break
-        except OSError:
-            continue
-    if _speex_lib is None:
-        _path = ctypes.util.find_library("speexdsp")
-        if _path:
-            _speex_lib = ctypes.CDLL(_path)
-
-    if _speex_lib is not None:
-        _speex_lib.speex_echo_state_init.argtypes = [c_int, c_int]
-        _speex_lib.speex_echo_state_init.restype = c_void_p
-        _speex_lib.speex_echo_state_destroy.argtypes = [c_void_p]
-        _speex_lib.speex_echo_state_destroy.restype = None
-        _speex_lib.speex_echo_state_reset.argtypes = [c_void_p]
-        _speex_lib.speex_echo_state_reset.restype = None
-        _speex_lib.speex_echo_cancellation.argtypes = [c_void_p, POINTER(c_int16), POINTER(c_int16), POINTER(c_int16)]
-        _speex_lib.speex_echo_cancellation.restype = None
-        _speex_lib.speex_echo_playback.argtypes = [c_void_p, POINTER(c_int16)]
-        _speex_lib.speex_echo_playback.restype = None
-        _speex_lib.speex_echo_capture.argtypes = [c_void_p, POINTER(c_int16), POINTER(c_int16)]
-        _speex_lib.speex_echo_capture.restype = None
-        _speex_lib.speex_echo_ctl.argtypes = [c_void_p, c_int, c_void_p]
-        _speex_lib.speex_echo_ctl.restype = c_int
-        HAS_SPEEXDSP = True
-    else:
-        print("libspeexdsp not found", flush=True)
-except Exception as _speex_err:
-    print(f"speexdsp ctypes init failed: {_speex_err}", flush=True)
 
 # Configuration from add-on options
 CONFIG_PATH = "/data/options.json"
@@ -143,7 +104,6 @@ logger = logging.getLogger(__name__)
 # Silence noisy websockets debug logging
 logging.getLogger("websockets").setLevel(logging.WARNING)
 
-logger.info("speexdsp available: %s", HAS_SPEEXDSP)
 
 
 class HomeAssistantClient:
@@ -216,30 +176,7 @@ class GeminiSession:
         self.audio_out_queue = asyncio.Queue(maxsize=50)
         self.session = None
         self.active = False
-        self.playing = False  # True while sending audio to speaker
-
-        # Echo cancellation via libspeexdsp ctypes (async API)
-        self.aec_frame_size = 256  # samples (16ms at 16kHz)
-        self._aec_state = None
-        self._aec_out_buf = None
-        if HAS_SPEEXDSP:
-            try:
-                self._aec_state = _speex_lib.speex_echo_state_init(
-                    self.aec_frame_size, 4800  # 300ms echo tail at 16kHz
-                )
-                # Set sample rate
-                rate = c_int32(SEND_SAMPLE_RATE)
-                _speex_lib.speex_echo_ctl(self._aec_state, 24, ctypes.byref(rate))
-                # Pre-allocate output buffer
-                self._aec_out_buf = (c_int16 * self.aec_frame_size)()
-                print(f"AEC initialized: frame={self.aec_frame_size} filter=4800 rate={SEND_SAMPLE_RATE}", flush=True)
-                logger.info("AEC initialized (ctypes): frame=%d, filter=4800, rate=%d",
-                            self.aec_frame_size, SEND_SAMPLE_RATE)
-            except Exception as e:
-                logger.warning("Failed to initialize AEC: %s", e)
-                self._aec_state = None
-        else:
-            logger.warning("libspeexdsp not available - echo cancellation disabled")
+        self.playing = False  # True while sending audio to speaker (mute mic)
 
         # System instructions
         if CROATIAN_PERSONALITY:
@@ -419,60 +356,6 @@ Ti: [pozovi end_conversation()] "Doviđenja!"
         self.active = False
         return {"success": True, "message": "Conversation ended"}
 
-    def add_speaker_reference(self, data_24khz: bytes):
-        """Feed 24kHz speaker audio to speex AEC (async playback API).
-        Downsamples to 16kHz and feeds frame-by-frame."""
-        if self._aec_state is None:
-            return
-        samples = np.frombuffer(data_24khz, dtype='<i2')
-        if len(samples) < 3:
-            return
-        # Downsample 24kHz -> 16kHz (ratio 2:3)
-        n_out = len(samples) * 2 // 3
-        if n_out < 1:
-            return
-        indices = np.linspace(0, len(samples) - 1, n_out)
-        resampled = np.interp(indices, np.arange(len(samples)), samples.astype(np.float64))
-        ref_16k = np.clip(resampled, -32768, 32767).astype('<i2').tobytes()
-
-        # Feed to speex in frame-sized chunks via async playback API
-        frame_bytes = self.aec_frame_size * 2
-        pos = 0
-        while pos + frame_bytes <= len(ref_16k):
-            play_buf = (c_int16 * self.aec_frame_size).from_buffer_copy(
-                ref_16k[pos:pos + frame_bytes]
-            )
-            _speex_lib.speex_echo_playback(self._aec_state, play_buf)
-            pos += frame_bytes
-
-    def _apply_aec(self, mic_data: bytes) -> bytes:
-        """Apply echo cancellation using speex async capture API.
-        Only active when speaker is playing - no echo to cancel when silent."""
-        if self._aec_state is None or not self.playing:
-            return mic_data
-
-        frame_bytes = self.aec_frame_size * 2  # 16-bit = 2 bytes/sample
-        result = bytearray()
-        pos = 0
-
-        while pos + frame_bytes <= len(mic_data):
-            mic_frame = mic_data[pos:pos + frame_bytes]
-            try:
-                rec_buf = (c_int16 * self.aec_frame_size).from_buffer_copy(mic_frame)
-                _speex_lib.speex_echo_capture(
-                    self._aec_state, rec_buf, self._aec_out_buf
-                )
-                result.extend(bytes(self._aec_out_buf))
-            except Exception:
-                result.extend(mic_frame)
-            pos += frame_bytes
-
-        # Append any remaining bytes (less than a full frame)
-        if pos < len(mic_data):
-            result.extend(mic_data[pos:])
-
-        return bytes(result)
-
     async def send_audio_to_gemini(self):
         """Background task to send audio from device to Gemini"""
         chunks_to_gemini = 0
@@ -488,19 +371,15 @@ Ti: [pozovi end_conversation()] "Doviđenja!"
                 if DEVICE_BITS_PER_SAMPLE == 32:
                     audio_data = convert_32bit_to_16bit(audio_data)
 
-                # Apply echo cancellation before sending to Gemini
-                audio_data = self._apply_aec(audio_data)
-
-                # Log raw vs AEC levels to verify echo cancellation
+                # Log mic levels
                 chunks_to_gemini += 1
                 if chunks_to_gemini % 50 == 0:
                     raw_samples = np.frombuffer(raw_audio, dtype='<i4') if len(raw_audio) % 4 == 0 else np.array([])
-                    aec_samples = np.frombuffer(audio_data, dtype='<i2') if len(audio_data) >= 2 else np.array([])
                     if len(raw_samples) >= 2:
-                        p_raw = int(np.abs(raw_samples[0::2] >> 16).max())
-                        p_aec = int(np.abs(aec_samples).max()) if len(aec_samples) > 0 else 0
+                        p0 = int(np.abs(raw_samples[0::2] >> 16).max())
+                        p1 = int(np.abs(raw_samples[1::2] >> 16).max())
                         playing = "SPEAKER_ON" if self.playing else "speaker_off"
-                        logger.info(f"MIC #{chunks_to_gemini}: raw={p_raw} aec={p_aec} [{playing}]")
+                        logger.info(f"MIC #{chunks_to_gemini}: L={p0} R={p1} [{playing}]")
 
                 await self.session.send_realtime_input(audio={"data": audio_data, "mime_type": "audio/pcm"})
             logger.info("Exited send loop, session no longer active")
@@ -524,22 +403,6 @@ Ti: [pozovi end_conversation()] "Doviđenja!"
                         chunks_from_gemini += 1
                         self.audio_in_queue.put_nowait(data)
                         continue
-
-                    # Handle interruption from Gemini (user spoke over response)
-                    sc = getattr(response, 'server_content', None)
-                    if sc and getattr(sc, 'interrupted', False):
-                        cleared = 0
-                        while not self.audio_in_queue.empty():
-                            try:
-                                self.audio_in_queue.get_nowait()
-                                cleared += 1
-                            except asyncio.QueueEmpty:
-                                break
-                        self.playing = False
-                        # Reset AEC state - old reference is stale
-                        if self._aec_state:
-                            _speex_lib.speex_echo_state_reset(self._aec_state)
-                        logger.info(f"Gemini interrupted, cleared {cleared} queued chunks")
 
                     # Handle text (for debugging)
                     if text := response.text:
@@ -565,8 +428,8 @@ Ti: [pozovi end_conversation()] "Doviđenja!"
                                 self.active = False
                                 return
 
-                # Turn complete - don't flush queue (remaining audio still playing)
-                # Bridge-side AEC + interruption handling above prevent self-interruption
+                # Turn complete - do NOT flush queue
+                # XMOS echo cancellation should prevent self-interruption
                 logger.info(f"Turn complete, {chunks_from_gemini} Gemini chunks, queue: {self.audio_in_queue.qsize()}")
 
             logger.info("Exited receive loop, session no longer active")
@@ -739,9 +602,6 @@ class DeviceConnection:
                     continue
 
                 self.gemini_session.playing = True
-
-                # Store speaker reference for AEC before sending to device
-                self.gemini_session.add_speaker_reference(data)
 
                 # Send entire Gemini chunk as one message (no splitting)
                 # This ensures continuous audio with no gaps

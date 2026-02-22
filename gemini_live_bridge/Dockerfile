@@ -1,12 +1,11 @@
 ARG BUILD_FROM=ghcr.io/home-assistant/aarch64-base:latest
 FROM $BUILD_FROM
 
-# Install Python and dependencies (speexdsp-dev provides libspeexdsp.so for ctypes)
+# Install Python and dependencies
 RUN apk add --no-cache \
     python3 \
     py3-pip \
-    py3-numpy \
-    speexdsp-dev
+    py3-numpy
 
 # Copy requirements
 COPY requirements.txt /tmp/
