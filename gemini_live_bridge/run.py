@@ -66,13 +66,15 @@ DEVICE_BITS_PER_SAMPLE = 32  # ESP32 I2S sends 32-bit samples
 
 
 def convert_32bit_to_16bit(data: bytes) -> bytes:
-    """Convert 32-bit stereo I2S to 16-bit mono PCM (extract channel 0 = XMOS AEC)."""
+    """Convert 32-bit stereo I2S to 16-bit mono PCM (extract XMOS AEC channel).
+    Log both channels to find which has better AEC."""
     if len(data) % 4 != 0:
         return data
     all_samples = np.frombuffer(data, dtype='<i4')
-    # Stereo interleaved: [L0, R0, L1, R1, ...] - take left channel (ch0 = AEC processed)
-    ch0 = all_samples[0::2]
-    return (ch0 >> 16).astype('<i2').tobytes()
+    ch0 = all_samples[0::2]  # left
+    ch1 = all_samples[1::2]  # right
+    # Try channel 1 (right) - might be the AEC-processed one
+    return (ch1 >> 16).astype('<i2').tobytes()
 
 
 def process_gemini_audio(data: bytes) -> bytes:
@@ -364,19 +366,22 @@ Ti: [pozovi end_conversation()] "Doviđenja!"
                 if audio_data is None:
                     break
 
-                # Convert stereo 32-bit I2S → mono 16-bit PCM (ch0 = XMOS AEC)
+                # Convert stereo 32-bit I2S → mono 16-bit PCM
+                raw_audio = audio_data  # save for logging
                 if DEVICE_BITS_PER_SAMPLE == 32:
                     audio_data = convert_32bit_to_16bit(audio_data)
 
-                # XMOS AEC on ch0 handles echo cancellation
-                await self.session.send_realtime_input(audio={"data": audio_data, "mime_type": "audio/pcm"})
+                # Log both channels to compare AEC effectiveness
                 chunks_to_gemini += 1
                 if chunks_to_gemini % 50 == 0:
-                    samples = array.array('h')
-                    samples.frombytes(audio_data)
-                    peak = max(abs(s) for s in samples) if samples else 0
-                    playing = "SPEAKER_ON" if self.playing else "speaker_off"
-                    logger.info(f"MIC #{chunks_to_gemini}: peak={peak} [{playing}]")
+                    raw_samples = np.frombuffer(raw_audio, dtype='<i4') if len(raw_audio) % 4 == 0 else np.array([])
+                    if len(raw_samples) >= 2:
+                        p0 = int(np.abs(raw_samples[0::2] >> 16).max())
+                        p1 = int(np.abs(raw_samples[1::2] >> 16).max())
+                        playing = "SPEAKER_ON" if self.playing else "speaker_off"
+                        logger.info(f"MIC #{chunks_to_gemini}: L={p0} R={p1} [{playing}]")
+
+                await self.session.send_realtime_input(audio={"data": audio_data, "mime_type": "audio/pcm"})
             logger.info("Exited send loop, session no longer active")
         except Exception as e:
             logger.error(f"Error sending audio to Gemini: {e}", exc_info=True)
