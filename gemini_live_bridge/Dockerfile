@@ -11,7 +11,7 @@ RUN apk add --no-cache \
 # Copy requirements and install with build tools (swig needed for speexdsp)
 COPY requirements.txt /tmp/
 RUN apk add --no-cache --virtual .build-deps \
-        gcc musl-dev python3-dev swig && \
+        gcc g++ musl-dev python3-dev swig && \
     pip3 install --break-system-packages --no-cache-dir -r /tmp/requirements.txt && \
     apk del .build-deps
 
