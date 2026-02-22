@@ -602,23 +602,17 @@ class DeviceConnection:
 
                 self.gemini_session.playing = True
 
-                # Split large chunks into ~1920 byte pieces (40ms each)
-                # so pacing is even (first Gemini chunk can be 46080 bytes!)
-                MAX_SEND = 1920
-                offset = 0
-                while offset < len(data):
-                    chunk = data[offset:offset + MAX_SEND]
-                    header = struct.pack('>I', len(chunk))
-                    self.writer.write(header + chunk)
-                    await self.writer.drain()
-                    chunks_sent += 1
-                    offset += MAX_SEND
-
-                    # Pace each sub-chunk at real-time
-                    chunk_duration = len(chunk) / 48000.0 * 0.9
-                    await asyncio.sleep(chunk_duration)
-
+                # Send entire Gemini chunk as one message (no splitting)
+                # This ensures continuous audio with no gaps
+                header = struct.pack('>I', len(data))
+                self.writer.write(header + data)
+                await self.writer.drain()
+                chunks_sent += 1
                 bytes_sent += len(data)
+
+                # Sleep for the audio duration AFTER sending
+                chunk_duration = len(data) / 48000.0 * 0.9
+                await asyncio.sleep(chunk_duration)
 
                 # Mark not playing when queue is empty
                 if self.gemini_session.audio_in_queue.empty():
