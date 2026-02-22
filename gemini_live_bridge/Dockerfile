@@ -1,19 +1,16 @@
 ARG BUILD_FROM=ghcr.io/home-assistant/aarch64-base:latest
 FROM $BUILD_FROM
 
-# Install Python and runtime dependencies
+# Install Python and dependencies (speexdsp-dev provides libspeexdsp.so for ctypes)
 RUN apk add --no-cache \
     python3 \
     py3-pip \
     py3-numpy \
     speexdsp-dev
 
-# Copy requirements and install with build tools (swig needed for speexdsp)
+# Copy requirements
 COPY requirements.txt /tmp/
-RUN apk add --no-cache --virtual .build-deps \
-        gcc g++ musl-dev python3-dev swig && \
-    pip3 install --break-system-packages --no-cache-dir -r /tmp/requirements.txt && \
-    apk del .build-deps
+RUN pip3 install --break-system-packages --no-cache-dir -r /tmp/requirements.txt
 
 # Copy add-on files
 COPY run.py /

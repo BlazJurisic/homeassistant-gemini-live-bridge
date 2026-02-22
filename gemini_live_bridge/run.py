@@ -19,13 +19,41 @@ from google import genai
 from google.genai import types
 import aiohttp
 
+# Speex echo canceller via ctypes (no pip package needed, just libspeexdsp.so)
+import ctypes
+import ctypes.util
+from ctypes import c_int, c_void_p, POINTER, c_int16, c_int32
+
+HAS_SPEEXDSP = False
 try:
-    from speexdsp import EchoCanceller
-    HAS_SPEEXDSP = True
+    _speex_lib = None
+    for _name in ["libspeexdsp.so.1", "libspeexdsp.so", "speexdsp"]:
+        try:
+            _speex_lib = ctypes.CDLL(_name)
+            break
+        except OSError:
+            continue
+    if _speex_lib is None:
+        _path = ctypes.util.find_library("speexdsp")
+        if _path:
+            _speex_lib = ctypes.CDLL(_path)
+
+    if _speex_lib is not None:
+        _speex_lib.speex_echo_state_init.argtypes = [c_int, c_int]
+        _speex_lib.speex_echo_state_init.restype = c_void_p
+        _speex_lib.speex_echo_state_destroy.argtypes = [c_void_p]
+        _speex_lib.speex_echo_state_destroy.restype = None
+        _speex_lib.speex_echo_state_reset.argtypes = [c_void_p]
+        _speex_lib.speex_echo_state_reset.restype = None
+        _speex_lib.speex_echo_cancellation.argtypes = [c_void_p, POINTER(c_int16), POINTER(c_int16), POINTER(c_int16)]
+        _speex_lib.speex_echo_cancellation.restype = None
+        _speex_lib.speex_echo_ctl.argtypes = [c_void_p, c_int, c_void_p]
+        _speex_lib.speex_echo_ctl.restype = c_int
+        HAS_SPEEXDSP = True
+    else:
+        print("libspeexdsp not found", flush=True)
 except Exception as _speex_err:
-    HAS_SPEEXDSP = False
-    # Log at startup (before logger is configured, use print)
-    print(f"speexdsp import failed: {_speex_err}", flush=True)
+    print(f"speexdsp ctypes init failed: {_speex_err}", flush=True)
 
 # Configuration from add-on options
 CONFIG_PATH = "/data/options.json"
@@ -184,23 +212,28 @@ class GeminiSession:
         self.active = False
         self.playing = False  # True while sending audio to speaker
 
-        # Echo cancellation
+        # Echo cancellation via libspeexdsp ctypes
         self.speaker_ref_buffer = bytearray()
         self.aec_frame_size = 256  # samples (16ms at 16kHz)
-        self.echo_canceller = None
+        self._aec_state = None
+        self._aec_out_buf = None
         if HAS_SPEEXDSP:
             try:
-                self.echo_canceller = EchoCanceller(
-                    frame_size=self.aec_frame_size,
-                    filter_length=4800,  # 300ms echo tail at 16kHz
-                    sample_rate=SEND_SAMPLE_RATE
+                self._aec_state = _speex_lib.speex_echo_state_init(
+                    self.aec_frame_size, 4800  # 300ms echo tail at 16kHz
                 )
-                logger.info("AEC initialized: frame=%d, filter=4800, rate=%d",
+                # Set sample rate
+                rate = c_int32(SEND_SAMPLE_RATE)
+                _speex_lib.speex_echo_ctl(self._aec_state, 24, ctypes.byref(rate))
+                # Pre-allocate output buffer
+                self._aec_out_buf = (c_int16 * self.aec_frame_size)()
+                logger.info("AEC initialized (ctypes): frame=%d, filter=4800, rate=%d",
                             self.aec_frame_size, SEND_SAMPLE_RATE)
             except Exception as e:
                 logger.warning("Failed to initialize AEC: %s", e)
+                self._aec_state = None
         else:
-            logger.warning("speexdsp not available - echo cancellation disabled")
+            logger.warning("libspeexdsp not available - echo cancellation disabled")
 
         # System instructions
         if CROATIAN_PERSONALITY:
@@ -382,7 +415,7 @@ Ti: [pozovi end_conversation()] "Doviđenja!"
 
     def add_speaker_reference(self, data_24khz: bytes):
         """Store 24kHz speaker audio downsampled to 16kHz as AEC reference."""
-        if self.echo_canceller is None:
+        if self._aec_state is None:
             return
         samples = np.frombuffer(data_24khz, dtype='<i2')
         if len(samples) < 3:
@@ -403,7 +436,7 @@ Ti: [pozovi end_conversation()] "Doviđenja!"
 
     def _apply_aec(self, mic_data: bytes) -> bytes:
         """Apply echo cancellation to mic data using speaker reference."""
-        if self.echo_canceller is None:
+        if self._aec_state is None:
             return mic_data
 
         frame_bytes = self.aec_frame_size * 2  # 16-bit = 2 bytes/sample
@@ -420,8 +453,12 @@ Ti: [pozovi end_conversation()] "Doviđenja!"
                 ref_frame = b'\x00' * frame_bytes
 
             try:
-                cleaned = self.echo_canceller.process(mic_frame, ref_frame)
-                result.extend(cleaned)
+                rec_buf = (c_int16 * self.aec_frame_size).from_buffer_copy(mic_frame)
+                play_buf = (c_int16 * self.aec_frame_size).from_buffer_copy(ref_frame)
+                _speex_lib.speex_echo_cancellation(
+                    self._aec_state, rec_buf, play_buf, self._aec_out_buf
+                )
+                result.extend(bytes(self._aec_out_buf))
             except Exception:
                 result.extend(mic_frame)
             pos += frame_bytes
@@ -494,8 +531,10 @@ Ti: [pozovi end_conversation()] "Doviđenja!"
                             except asyncio.QueueEmpty:
                                 break
                         self.playing = False
-                        # Clear AEC reference buffer too - old reference is stale
+                        # Clear AEC state - old reference is stale
                         self.speaker_ref_buffer.clear()
+                        if self._aec_state:
+                            _speex_lib.speex_echo_state_reset(self._aec_state)
                         logger.info(f"Gemini interrupted, cleared {cleared} queued chunks")
 
                     # Handle text (for debugging)
