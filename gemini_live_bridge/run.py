@@ -602,20 +602,13 @@ class DeviceConnection:
 
                 self.gemini_session.playing = True
 
-                # Send faster than real-time (60%) to keep ESP32 speaker buffer full
-                # Prevents crackling from asyncio.sleep() jitter
-                # 24kHz 16-bit mono = 2 bytes per sample = 48000 bytes/sec
-                chunk_duration = len(data) / 48000.0 * 0.6
-
-                # Send entire Gemini chunk as one TCP message
+                # Send immediately - no pacing sleep
+                # ESP32 has 2-second speaker buffer that absorbs bursts
                 header = struct.pack('>I', len(data))
                 self.writer.write(header + data)
                 await self.writer.drain()
                 chunks_sent += 1
                 bytes_sent += len(data)
-
-                # THE CLOCK: sleep for the audio duration (real-time pacing)
-                await asyncio.sleep(chunk_duration)
 
                 # Mark not playing when queue is empty
                 if self.gemini_session.audio_in_queue.empty():
