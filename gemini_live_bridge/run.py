@@ -47,6 +47,10 @@ try:
         _speex_lib.speex_echo_state_reset.restype = None
         _speex_lib.speex_echo_cancellation.argtypes = [c_void_p, POINTER(c_int16), POINTER(c_int16), POINTER(c_int16)]
         _speex_lib.speex_echo_cancellation.restype = None
+        _speex_lib.speex_echo_playback.argtypes = [c_void_p, POINTER(c_int16)]
+        _speex_lib.speex_echo_playback.restype = None
+        _speex_lib.speex_echo_capture.argtypes = [c_void_p, POINTER(c_int16), POINTER(c_int16)]
+        _speex_lib.speex_echo_capture.restype = None
         _speex_lib.speex_echo_ctl.argtypes = [c_void_p, c_int, c_void_p]
         _speex_lib.speex_echo_ctl.restype = c_int
         HAS_SPEEXDSP = True
@@ -214,8 +218,7 @@ class GeminiSession:
         self.active = False
         self.playing = False  # True while sending audio to speaker
 
-        # Echo cancellation via libspeexdsp ctypes
-        self.speaker_ref_buffer = bytearray()
+        # Echo cancellation via libspeexdsp ctypes (async API)
         self.aec_frame_size = 256  # samples (16ms at 16kHz)
         self._aec_state = None
         self._aec_out_buf = None
@@ -417,7 +420,8 @@ Ti: [pozovi end_conversation()] "Doviđenja!"
         return {"success": True, "message": "Conversation ended"}
 
     def add_speaker_reference(self, data_24khz: bytes):
-        """Store 24kHz speaker audio downsampled to 16kHz as AEC reference."""
+        """Feed 24kHz speaker audio to speex AEC (async playback API).
+        Downsamples to 16kHz and feeds frame-by-frame."""
         if self._aec_state is None:
             return
         samples = np.frombuffer(data_24khz, dtype='<i2')
@@ -429,16 +433,20 @@ Ti: [pozovi end_conversation()] "Doviđenja!"
             return
         indices = np.linspace(0, len(samples) - 1, n_out)
         resampled = np.interp(indices, np.arange(len(samples)), samples.astype(np.float64))
-        self.speaker_ref_buffer.extend(
-            np.clip(resampled, -32768, 32767).astype('<i2').tobytes()
-        )
-        # Cap at 1 second of reference (16kHz * 2 bytes = 32KB)
-        max_bytes = SEND_SAMPLE_RATE * 2
-        if len(self.speaker_ref_buffer) > max_bytes:
-            self.speaker_ref_buffer = self.speaker_ref_buffer[-max_bytes:]
+        ref_16k = np.clip(resampled, -32768, 32767).astype('<i2').tobytes()
+
+        # Feed to speex in frame-sized chunks via async playback API
+        frame_bytes = self.aec_frame_size * 2
+        pos = 0
+        while pos + frame_bytes <= len(ref_16k):
+            play_buf = (c_int16 * self.aec_frame_size).from_buffer_copy(
+                ref_16k[pos:pos + frame_bytes]
+            )
+            _speex_lib.speex_echo_playback(self._aec_state, play_buf)
+            pos += frame_bytes
 
     def _apply_aec(self, mic_data: bytes) -> bytes:
-        """Apply echo cancellation to mic data using speaker reference."""
+        """Apply echo cancellation using speex async capture API."""
         if self._aec_state is None:
             return mic_data
 
@@ -448,18 +456,10 @@ Ti: [pozovi end_conversation()] "Doviđenja!"
 
         while pos + frame_bytes <= len(mic_data):
             mic_frame = mic_data[pos:pos + frame_bytes]
-
-            if len(self.speaker_ref_buffer) >= frame_bytes:
-                ref_frame = bytes(self.speaker_ref_buffer[:frame_bytes])
-                del self.speaker_ref_buffer[:frame_bytes]
-            else:
-                ref_frame = b'\x00' * frame_bytes
-
             try:
                 rec_buf = (c_int16 * self.aec_frame_size).from_buffer_copy(mic_frame)
-                play_buf = (c_int16 * self.aec_frame_size).from_buffer_copy(ref_frame)
-                _speex_lib.speex_echo_cancellation(
-                    self._aec_state, rec_buf, play_buf, self._aec_out_buf
+                _speex_lib.speex_echo_capture(
+                    self._aec_state, rec_buf, self._aec_out_buf
                 )
                 result.extend(bytes(self._aec_out_buf))
             except Exception:
@@ -490,15 +490,16 @@ Ti: [pozovi end_conversation()] "Doviđenja!"
                 # Apply echo cancellation before sending to Gemini
                 audio_data = self._apply_aec(audio_data)
 
-                # Log both channels to compare AEC effectiveness
+                # Log raw vs AEC levels to verify echo cancellation
                 chunks_to_gemini += 1
                 if chunks_to_gemini % 50 == 0:
                     raw_samples = np.frombuffer(raw_audio, dtype='<i4') if len(raw_audio) % 4 == 0 else np.array([])
+                    aec_samples = np.frombuffer(audio_data, dtype='<i2') if len(audio_data) >= 2 else np.array([])
                     if len(raw_samples) >= 2:
-                        p0 = int(np.abs(raw_samples[0::2] >> 16).max())
-                        p1 = int(np.abs(raw_samples[1::2] >> 16).max())
+                        p_raw = int(np.abs(raw_samples[0::2] >> 16).max())
+                        p_aec = int(np.abs(aec_samples).max()) if len(aec_samples) > 0 else 0
                         playing = "SPEAKER_ON" if self.playing else "speaker_off"
-                        logger.info(f"MIC #{chunks_to_gemini}: L={p0} R={p1} [{playing}]")
+                        logger.info(f"MIC #{chunks_to_gemini}: raw={p_raw} aec={p_aec} [{playing}]")
 
                 await self.session.send_realtime_input(audio={"data": audio_data, "mime_type": "audio/pcm"})
             logger.info("Exited send loop, session no longer active")
@@ -534,8 +535,7 @@ Ti: [pozovi end_conversation()] "Doviđenja!"
                             except asyncio.QueueEmpty:
                                 break
                         self.playing = False
-                        # Clear AEC state - old reference is stale
-                        self.speaker_ref_buffer.clear()
+                        # Reset AEC state - old reference is stale
                         if self._aec_state:
                             _speex_lib.speex_echo_state_reset(self._aec_state)
                         logger.info(f"Gemini interrupted, cleared {cleared} queued chunks")
