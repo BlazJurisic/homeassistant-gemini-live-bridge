@@ -428,15 +428,19 @@ Ti: [pozovi end_conversation()] "Doviđenja!"
                                 self.active = False
                                 return
 
-                # Turn complete - FLUSH queue for interruptions to work
-                # When user interrupts, we need to stop playback immediately
+                # Turn complete - clear queue only if there's a lot left (interruption)
+                # If queue has more than 10 chunks, user probably interrupted
                 queue_size = self.audio_in_queue.qsize()
-                while not self.audio_in_queue.empty():
-                    try:
-                        self.audio_in_queue.get_nowait()
-                    except:
-                        break
-                logger.info(f"Turn complete, {chunks_from_gemini} Gemini chunks, cleared {queue_size} from queue")
+                if queue_size > 10:
+                    logger.info(f"Interruption detected - clearing {queue_size} chunks from queue")
+                    while not self.audio_in_queue.empty():
+                        try:
+                            self.audio_in_queue.get_nowait()
+                        except:
+                            break
+                else:
+                    logger.info(f"Turn complete, {chunks_from_gemini} Gemini chunks, queue: {queue_size} (letting it drain)")
+                chunks_from_gemini = 0  # Reset for next turn
 
             logger.info("Exited receive loop, session no longer active")
         except Exception as e:
