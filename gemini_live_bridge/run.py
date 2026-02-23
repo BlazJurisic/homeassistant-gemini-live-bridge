@@ -428,9 +428,15 @@ Ti: [pozovi end_conversation()] "Doviđenja!"
                                 self.active = False
                                 return
 
-                # Turn complete - do NOT flush queue
-                # XMOS echo cancellation should prevent self-interruption
-                logger.info(f"Turn complete, {chunks_from_gemini} Gemini chunks, queue: {self.audio_in_queue.qsize()}")
+                # Turn complete - FLUSH queue for interruptions to work
+                # When user interrupts, we need to stop playback immediately
+                queue_size = self.audio_in_queue.qsize()
+                while not self.audio_in_queue.empty():
+                    try:
+                        self.audio_in_queue.get_nowait()
+                    except:
+                        break
+                logger.info(f"Turn complete, {chunks_from_gemini} Gemini chunks, cleared {queue_size} from queue")
 
             logger.info("Exited receive loop, session no longer active")
         except Exception as e:
