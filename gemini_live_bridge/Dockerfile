@@ -5,7 +5,13 @@ FROM $BUILD_FROM
 RUN apk add --no-cache \
     python3 \
     py3-pip \
-    py3-numpy
+    py3-numpy \
+    swig \
+    gcc \
+    g++ \
+    musl-dev \
+    linux-headers \
+    webrtc-audio-processing-dev
 
 # Copy requirements
 COPY requirements.txt /tmp/
