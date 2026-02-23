@@ -11,7 +11,7 @@ RUN apk add --no-cache \
     g++ \
     musl-dev \
     linux-headers \
-    webrtc-audio-processing-dev
+    webrtc-audio-processing-1-dev
 
 # Copy requirements
 COPY requirements.txt /tmp/
