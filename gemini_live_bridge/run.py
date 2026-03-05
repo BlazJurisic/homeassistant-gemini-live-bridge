@@ -104,7 +104,7 @@ class SpeexAEC:
     """
 
     FRAME_SIZE = 256      # 16ms at 16kHz (speexdsp processes fixed frames)
-    FILTER_LENGTH = 4000  # 250ms echo tail at 16kHz
+    FILTER_LENGTH = 8000  # 500ms echo tail at 16kHz (needs to cover full delay path)
 
     def __init__(self):
         self.lib = None
@@ -114,6 +114,10 @@ class SpeexAEC:
         # Reference ring buffer: stores speaker audio for AEC
         # 24kHz from Gemini → downsample to 16kHz for AEC reference
         self.ref_buffer = collections.deque(maxlen=32000)  # ~2 seconds at 16kHz
+        # Pre-fill with silence to account for playback delay
+        # ESP32 has ~100-200ms speaker buffer + network delay
+        delay_samples = int(16000 * 0.15)  # 150ms delay
+        self.ref_buffer.extend([0] * delay_samples)
 
     def _init_speex(self):
         """Initialize speexdsp library via ctypes."""
