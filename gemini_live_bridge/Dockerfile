@@ -5,7 +5,8 @@ FROM $BUILD_FROM
 RUN apk add --no-cache \
     python3 \
     py3-pip \
-    py3-numpy
+    py3-numpy \
+    speexdsp-dev
 
 # Copy requirements
 COPY requirements.txt /tmp/
