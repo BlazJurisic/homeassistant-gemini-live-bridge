@@ -14,9 +14,6 @@ import socket
 import array
 from typing import Optional, Dict, Any
 
-import ctypes
-import collections
-
 import numpy as np
 from google import genai
 from google.genai import types
@@ -93,134 +90,6 @@ def process_gemini_audio(data: bytes) -> bytes:
         return data
     # repeat 4x = 2x upsample * 2 channels, then left-justify to 32-bit
     return (np.repeat(samples.astype(np.int32), 4) << 16).tobytes()
-
-# ==================== SpeexDSP AEC via ctypes ====================
-
-class SpeexAEC:
-    """Acoustic Echo Cancellation using libspeexdsp via ctypes.
-
-    Processes mic audio with speaker reference to remove echo.
-    Both streams must be 16kHz 16-bit mono.
-    """
-
-    FRAME_SIZE = 256      # 16ms at 16kHz (speexdsp processes fixed frames)
-    FILTER_LENGTH = 8000  # 500ms echo tail at 16kHz (needs to cover full delay path)
-
-    def __init__(self):
-        self.lib = None
-        self.state = None
-        self.pp_state = None
-        self._init_speex()
-        # Reference ring buffer: stores speaker audio for AEC
-        # 24kHz from Gemini → downsample to 16kHz for AEC reference
-        self.ref_buffer = collections.deque(maxlen=32000)  # ~2 seconds at 16kHz
-        # Pre-fill with silence to account for playback delay
-        # ESP32 has ~100-200ms speaker buffer + network delay
-        delay_samples = int(16000 * 0.15)  # 150ms delay
-        self.ref_buffer.extend([0] * delay_samples)
-
-    def _init_speex(self):
-        """Initialize speexdsp library via ctypes."""
-        try:
-            self.lib = ctypes.CDLL("libspeexdsp.so.1")
-        except OSError:
-            try:
-                self.lib = ctypes.CDLL("libspeexdsp.so")
-            except OSError:
-                logger.error("libspeexdsp not found! AEC disabled.")
-                return
-
-        # speex_echo_state_init(frame_size, filter_length) -> state*
-        self.lib.speex_echo_state_init.restype = ctypes.c_void_p
-        self.lib.speex_echo_state_init.argtypes = [ctypes.c_int, ctypes.c_int]
-
-        # speex_echo_cancellation(state, rec, play, out)
-        self.lib.speex_echo_cancellation.restype = None
-        self.lib.speex_echo_cancellation.argtypes = [
-            ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p
-        ]
-
-        # speex_echo_state_destroy(state)
-        self.lib.speex_echo_state_destroy.restype = None
-        self.lib.speex_echo_state_destroy.argtypes = [ctypes.c_void_p]
-
-        # Create echo canceller
-        self.state = self.lib.speex_echo_state_init(self.FRAME_SIZE, self.FILTER_LENGTH)
-        if not self.state:
-            logger.error("Failed to create speex echo state")
-            return
-
-        # Set sample rate via speex_echo_ctl
-        # SPEEX_ECHO_SET_SAMPLING_RATE = 24
-        self.lib.speex_echo_ctl.restype = ctypes.c_int
-        self.lib.speex_echo_ctl.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_void_p]
-        rate = ctypes.c_int(16000)
-        self.lib.speex_echo_ctl(self.state, 24, ctypes.byref(rate))
-
-        logger.info(f"SpeexAEC initialized: frame={self.FRAME_SIZE}, filter={self.FILTER_LENGTH}, rate=16kHz")
-
-    def feed_reference(self, audio_24khz: bytes):
-        """Feed speaker audio (24kHz 16-bit mono) as reference for AEC.
-        Downsamples 24kHz → 16kHz (3:2 ratio) and buffers."""
-        samples = np.frombuffer(audio_24khz, dtype='<i2')
-        # Downsample 24kHz → 16kHz: take 2 out of every 3 samples
-        # Simple: average pairs for the 2nd output sample
-        out_len = (len(samples) * 2) // 3
-        out = np.zeros(out_len, dtype=np.int16)
-        for i in range(0, out_len - 1, 2):
-            src = (i * 3) // 2
-            if src < len(samples):
-                out[i] = samples[src]
-            if src + 1 < len(samples) and src + 2 < len(samples):
-                out[i + 1] = np.int16((int(samples[src + 1]) + int(samples[src + 2])) // 2)
-        self.ref_buffer.extend(out.tolist())
-
-    def process(self, mic_16bit_mono: bytes) -> bytes:
-        """Process mic audio through AEC. Returns echo-cancelled audio.
-        Input: 16kHz 16-bit mono. Output: same format, echo removed."""
-        if not self.state or not self.lib:
-            return mic_16bit_mono  # passthrough if AEC not available
-
-        mic_samples = np.frombuffer(mic_16bit_mono, dtype='<i2')
-        out_samples = np.zeros_like(mic_samples)
-
-        # Process in FRAME_SIZE chunks
-        pos = 0
-        while pos + self.FRAME_SIZE <= len(mic_samples):
-            mic_frame = mic_samples[pos:pos + self.FRAME_SIZE].copy()
-
-            # Get reference frame (what was being played through speaker)
-            if len(self.ref_buffer) >= self.FRAME_SIZE:
-                ref_list = [self.ref_buffer.popleft() for _ in range(self.FRAME_SIZE)]
-                ref_frame = np.array(ref_list, dtype=np.int16)
-            else:
-                ref_frame = np.zeros(self.FRAME_SIZE, dtype=np.int16)
-
-            out_frame = np.zeros(self.FRAME_SIZE, dtype=np.int16)
-
-            # Call speex AEC
-            self.lib.speex_echo_cancellation(
-                self.state,
-                mic_frame.ctypes.data_as(ctypes.c_void_p),
-                ref_frame.ctypes.data_as(ctypes.c_void_p),
-                out_frame.ctypes.data_as(ctypes.c_void_p),
-            )
-
-            out_samples[pos:pos + self.FRAME_SIZE] = out_frame
-            pos += self.FRAME_SIZE
-
-        # Handle remaining samples (pass through)
-        if pos < len(mic_samples):
-            out_samples[pos:] = mic_samples[pos:]
-
-        return out_samples.tobytes()
-
-    def destroy(self):
-        if self.state and self.lib:
-            self.lib.speex_echo_state_destroy(self.state)
-            self.state = None
-            logger.info("SpeexAEC destroyed")
-
 
 # Gemini configuration
 MODEL = "models/gemini-2.5-flash-native-audio-preview-09-2025"
@@ -307,9 +176,8 @@ class GeminiSession:
         self.audio_out_queue = asyncio.Queue(maxsize=50)
         self.session = None
         self.active = False
-        self.playing = False  # True while sending audio to speaker (mute mic)
+        self.playing = False  # True while sending audio to speaker
         self.protocol_version = 1  # Set by DeviceConnection after protocol detection
-        self.aec = SpeexAEC()  # Bridge-side echo cancellation
 
         # System instructions
         if CROATIAN_PERSONALITY:
@@ -499,30 +367,29 @@ Ti: [pozovi end_conversation()] "Doviđenja!"
                 if audio_data is None:
                     break
 
-                # Convert to 16-bit mono (from stereo 32-bit or already mono)
                 if self.protocol_version == 2:
-                    mono_16 = audio_data  # already 16-bit mono
+                    # AEC mode: already 16kHz 16-bit mono from ESP32 SpeexDSP
+                    chunks_to_gemini += 1
+                    if chunks_to_gemini % 50 == 0:
+                        samples = np.frombuffer(audio_data, dtype='<i2')
+                        peak = int(np.abs(samples).max()) if len(samples) > 0 else 0
+                        playing = "SPEAKER_ON" if self.playing else "speaker_off"
+                        logger.info(f"MIC(AEC) #{chunks_to_gemini}: peak={peak} [{playing}]")
                 else:
+                    # Legacy: convert stereo 32-bit → mono 16-bit
+                    raw_audio = audio_data
                     if DEVICE_BITS_PER_SAMPLE == 32:
-                        mono_16 = convert_32bit_to_16bit(audio_data)
-                    else:
-                        mono_16 = audio_data
+                        audio_data = convert_32bit_to_16bit(audio_data)
 
-                # Apply bridge-side AEC (echo cancellation using speaker reference)
-                raw_peak = 0
-                aec_peak = 0
-                aec_audio = self.aec.process(mono_16)
+                    chunks_to_gemini += 1
+                    if chunks_to_gemini % 50 == 0:
+                        raw_samples = np.frombuffer(raw_audio, dtype='<i4') if len(raw_audio) % 4 == 0 else np.array([])
+                        if len(raw_samples) >= 2:
+                            p0 = int(np.abs(raw_samples[0::2] >> 16).max())
+                            playing = "SPEAKER_ON" if self.playing else "speaker_off"
+                            logger.info(f"MIC #{chunks_to_gemini}: L={p0} [{playing}]")
 
-                chunks_to_gemini += 1
-                if chunks_to_gemini % 50 == 0:
-                    raw_samples = np.frombuffer(mono_16, dtype='<i2')
-                    aec_samples = np.frombuffer(aec_audio, dtype='<i2')
-                    raw_peak = int(np.abs(raw_samples).max()) if len(raw_samples) > 0 else 0
-                    aec_peak = int(np.abs(aec_samples).max()) if len(aec_samples) > 0 else 0
-                    playing = "SPEAKER_ON" if self.playing else "speaker_off"
-                    logger.info(f"MIC #{chunks_to_gemini}: raw={raw_peak} aec={aec_peak} [{playing}]")
-
-                await self.session.send_realtime_input(audio={"data": aec_audio, "mime_type": "audio/pcm"})
+                await self.session.send_realtime_input(audio={"data": audio_data, "mime_type": "audio/pcm"})
             logger.info("Exited send loop, session no longer active")
         except Exception as e:
             logger.error(f"Error sending audio to Gemini: {e}", exc_info=True)
@@ -783,9 +650,6 @@ class DeviceConnection:
                     continue
 
                 self.gemini_session.playing = True
-
-                # Feed speaker audio to AEC as reference (before sending to device)
-                self.gemini_session.aec.feed_reference(data)
 
                 # Send entire Gemini chunk as one message (no splitting)
                 # This ensures continuous audio with no gaps
