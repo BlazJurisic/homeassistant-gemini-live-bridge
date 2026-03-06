@@ -35,6 +35,7 @@ class OpenAIRealtimeProvider(BaseProvider):
         self.model = config.get("openai_model", DEFAULT_MODEL)
         self.ws = None
         self.ws_session = None
+        self._audio_accumulator = b""
 
         # Build system instruction
         croatian = config.get("croatian_personality", True)
@@ -188,10 +189,30 @@ PRAVILA RAZGOVORA:
                         audio_b64 = event.get("delta", "")
                         if audio_b64:
                             audio_data = base64.b64decode(audio_b64)
-                            self.audio_in_queue.put_nowait(audio_data)
-                            audio_chunks += 1
+                            # Accumulate small deltas into larger chunks for smoother playback
+                            self._audio_accumulator += audio_data
+                            # Flush when we have ~100ms of audio (4800 bytes at 24kHz 16-bit mono)
+                            if len(self._audio_accumulator) >= 4800:
+                                try:
+                                    self.audio_in_queue.put_nowait(self._audio_accumulator)
+                                except asyncio.QueueFull:
+                                    # Drop oldest to make room
+                                    try:
+                                        self.audio_in_queue.get_nowait()
+                                    except:
+                                        pass
+                                    self.audio_in_queue.put_nowait(self._audio_accumulator)
+                                self._audio_accumulator = b""
+                                audio_chunks += 1
 
                     elif event_type == "response.audio.done":
+                        # Flush remaining accumulated audio
+                        if self._audio_accumulator:
+                            try:
+                                self.audio_in_queue.put_nowait(self._audio_accumulator)
+                            except asyncio.QueueFull:
+                                pass
+                            self._audio_accumulator = b""
                         logger.info(f"Audio response complete, {audio_chunks} chunks")
                         audio_chunks = 0
 
@@ -208,6 +229,7 @@ PRAVILA RAZGOVORA:
                     elif event_type == "input_audio_buffer.speech_started":
                         logger.info("User started speaking")
                         # Clear queued audio (user interrupted)
+                        self._audio_accumulator = b""
                         while not self.audio_in_queue.empty():
                             try:
                                 self.audio_in_queue.get_nowait()
@@ -232,15 +254,7 @@ PRAVILA RAZGOVORA:
                         logger.info("OpenAI session updated")
 
                     elif event_type == "response.done":
-                        # Check for interruption
-                        queue_size = self.audio_in_queue.qsize()
-                        if queue_size > 10:
-                            logger.info(f"Clearing {queue_size} chunks (possible interruption)")
-                            while not self.audio_in_queue.empty():
-                                try:
-                                    self.audio_in_queue.get_nowait()
-                                except:
-                                    break
+                        logger.debug(f"Response done, queue: {self.audio_in_queue.qsize()}")
 
                 elif msg.type in (aiohttp.WSMsgType.CLOSED, aiohttp.WSMsgType.ERROR):
                     logger.info(f"WebSocket closed/error: {msg.type}")
