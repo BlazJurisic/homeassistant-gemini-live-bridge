@@ -66,7 +66,7 @@ Ti: [pozovi end_conversation()] "Doviđenja!"
         else:
             system_instruction = "You are a helpful home assistant. Control devices and answer questions."
 
-        voice_name = config.get("voice_name", "Zephyr")
+        voice_name = config.get("gemini_voice", "Zephyr")
 
         self.live_config = types.LiveConnectConfig(
             response_modalities=["AUDIO"],

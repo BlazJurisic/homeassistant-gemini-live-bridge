@@ -11,11 +11,21 @@ configuration:
     description: >-
       Google Gemini API key. Required for **Gemini** and **Hybrid** providers.
       Get one at https://aistudio.google.com/app/apikey
+  gemini_voice:
+    name: Gemini Voice
+    description: >-
+      Voice for Gemini provider. Zephyr (female), Puck (male), Charon (male),
+      Kore (female), Fenrir (male), Aoede (female).
   openai_api_key:
     name: OpenAI API Key
     description: >-
       OpenAI API key. Required for **OpenAI** provider, optional for **Hybrid**
       (if using OpenAI as the text LLM). Get one at https://platform.openai.com/api-keys
+  openai_voice:
+    name: OpenAI Voice
+    description: >-
+      Voice for OpenAI provider. Popular: alloy (neutral), echo (male),
+      sage (female), shimmer (female), coral (female).
   server_port:
     name: TCP Server Port
     description: >-
@@ -31,12 +41,6 @@ configuration:
     description: >-
       If enabled, the assistant responds in Croatian as "Jarvis".
       If disabled, uses a generic English assistant personality.
-  voice_name:
-    name: Voice Name
-    description: >-
-      Voice to use for speech output. For **Gemini**: Zephyr, Puck, Charon, Kore, Fenrir, Aoede.
-      For **OpenAI**: alloy, ash, ballad, coral, echo, sage, shimmer, verse.
-      Leave empty for default.
   session_timeout_seconds:
     name: Session Timeout (seconds)
     description: >-
@@ -62,6 +66,6 @@ configuration:
         name: Text LLM Provider
         description: >-
           Which LLM to use for text generation in Hybrid mode.
-          **Gemini** uses your Gemini API key, **OpenAI** uses your OpenAI key.
+          Uses the corresponding API key and voice from above.
 network:
   9872/tcp: ESP32 device audio bridge (TCP)

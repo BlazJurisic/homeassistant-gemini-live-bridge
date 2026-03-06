@@ -62,12 +62,7 @@ PRAVILA RAZGOVORA:
         else:
             self.system_instruction = "You are a helpful home assistant. Control devices and answer questions."
 
-        voice_name = config.get("voice_name", "alloy")
-        # Map Gemini voices to OpenAI equivalents
-        openai_voices = {"alloy", "ash", "ballad", "coral", "echo", "sage", "shimmer", "verse"}
-        if voice_name.lower() not in openai_voices:
-            voice_name = "alloy"
-        self.voice = voice_name.lower()
+        self.voice = config.get("openai_voice", "alloy").lower()
 
     def convert_device_audio(self, data: bytes) -> bytes:
         """Stereo 32-bit 16kHz -> mono 16-bit 24kHz for OpenAI."""
