@@ -1,5 +1,5 @@
 name: Voice Assistant Bridge
-version: "2.0.2"
+version: "2.0.3"
 slug: gemini_live_bridge
 description: Multi-provider full-duplex voice assistant bridge for ESP32 devices
 url: https://github.com/BlazJurisic/homeassistant-gemini-live-bridge
@@ -18,6 +18,7 @@ ports:
 options:
   provider: "gemini"
   gemini_api_key: ""
+  openai_api_key: ""
   server_port: 9872
   log_level: "info"
   croatian_personality: true
