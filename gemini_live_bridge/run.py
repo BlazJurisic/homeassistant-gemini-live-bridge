@@ -26,6 +26,13 @@ else:
 SERVER_PORT = int(config.get("server_port", 9872))
 LOG_LEVEL = config.get("log_level", "INFO").upper()
 
+# Flatten nested hybrid_settings into top-level config for provider access
+hybrid_settings = config.get("hybrid_settings", {})
+if isinstance(hybrid_settings, dict):
+    for key in ("soniox_api_key", "tts_api_key", "llm_provider"):
+        if key in hybrid_settings and hybrid_settings[key]:
+            config[key] = hybrid_settings[key]
+
 # Home Assistant connection
 _supervisor_token = os.environ.get("SUPERVISOR_TOKEN", "")
 if not _supervisor_token:

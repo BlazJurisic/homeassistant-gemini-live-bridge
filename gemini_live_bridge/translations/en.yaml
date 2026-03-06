@@ -1,0 +1,67 @@
+configuration:
+  provider:
+    name: Voice Provider
+    description: >-
+      Choose the voice engine for conversations.
+      **Gemini** — Google Gemini Live API (native V2V, lowest latency).
+      **OpenAI** — OpenAI Realtime API (native V2V, requires OpenAI key).
+      **Hybrid** — Soniox STT + text LLM + Google TTS (flexible, higher latency).
+  gemini_api_key:
+    name: Gemini API Key
+    description: >-
+      Google Gemini API key. Required for **Gemini** and **Hybrid** providers.
+      Get one at https://aistudio.google.com/app/apikey
+  openai_api_key:
+    name: OpenAI API Key
+    description: >-
+      OpenAI API key. Required for **OpenAI** provider, optional for **Hybrid**
+      (if using OpenAI as the text LLM). Get one at https://platform.openai.com/api-keys
+  server_port:
+    name: TCP Server Port
+    description: >-
+      Port the bridge listens on for ESP32 device connections.
+      Must match the port configured in your ESPHome YAML. Default: 9872.
+  log_level:
+    name: Log Level
+    description: >-
+      Logging verbosity. Use **debug** when troubleshooting audio or
+      connection issues. Use **info** for normal operation.
+  croatian_personality:
+    name: Croatian Personality
+    description: >-
+      If enabled, the assistant responds in Croatian as "Jarvis".
+      If disabled, uses a generic English assistant personality.
+  voice_name:
+    name: Voice Name
+    description: >-
+      Voice to use for speech output. For **Gemini**: Zephyr, Puck, Charon, Kore, Fenrir, Aoede.
+      For **OpenAI**: alloy, ash, ballad, coral, echo, sage, shimmer, verse.
+      Leave empty for default.
+  session_timeout_seconds:
+    name: Session Timeout (seconds)
+    description: >-
+      Seconds of inactivity before the session automatically ends.
+      Default: 300 (5 minutes).
+  hybrid_settings:
+    name: Hybrid Provider Settings
+    description: >-
+      Settings only used when Provider is set to **Hybrid**.
+      Configure STT (Soniox), text LLM backend, and TTS API key.
+    fields:
+      soniox_api_key:
+        name: Soniox API Key
+        description: >-
+          Soniox speech-to-text API key. Required for Hybrid provider.
+          Get one at https://soniox.com
+      tts_api_key:
+        name: TTS API Key (Google Cloud)
+        description: >-
+          Google Cloud API key for Text-to-Speech. If empty, falls back
+          to the Gemini API key. Needed for Hybrid provider audio output.
+      llm_provider:
+        name: Text LLM Provider
+        description: >-
+          Which LLM to use for text generation in Hybrid mode.
+          **Gemini** uses your Gemini API key, **OpenAI** uses your OpenAI key.
+network:
+  9872/tcp: ESP32 device audio bridge (TCP)
