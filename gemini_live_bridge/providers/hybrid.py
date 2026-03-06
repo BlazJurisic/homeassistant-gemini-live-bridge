@@ -1,0 +1,423 @@
+"""Hybrid provider: Soniox STT + Text LLM + Google TTS.
+
+Pipeline: Mic audio -> Soniox (streaming STT) -> Text LLM (function calling) -> Google TTS -> Speaker
+Latency: ~1-3s (sequential), but supports any text LLM provider.
+"""
+
+import asyncio
+import base64
+import json
+import logging
+from typing import Dict, Any, List, Optional
+
+import aiohttp
+
+from .base import BaseProvider
+
+logger = logging.getLogger(__name__)
+
+SONIOX_WS_URL = "wss://stt-rt.soniox.com/transcribe-websocket"
+GOOGLE_TTS_URL = "https://texttospeech.googleapis.com/v1/text:synthesize"
+
+
+class HybridProvider(BaseProvider):
+    """Hybrid provider using separate STT + LLM + TTS pipeline."""
+
+    def __init__(self, config: Dict[str, Any], ha_client, tool_registry, session_id: str):
+        super().__init__(config, ha_client, tool_registry, session_id)
+
+        self.soniox_api_key = config.get("soniox_api_key")
+        if not self.soniox_api_key:
+            raise ValueError("soniox_api_key is required for Hybrid provider")
+
+        self.tts_api_key = config.get("tts_api_key") or config.get("gemini_api_key")
+        self.llm_provider_name = config.get("llm_provider", "gemini")
+
+        # Conversation history for text LLM
+        self.conversation_history: List[Dict[str, str]] = []
+
+        # Build system instruction
+        croatian = config.get("croatian_personality", True)
+        if croatian:
+            self.system_instruction = """Ja sam Jarvis, virtualni asistent u pametnoj kući.
+Govoriš isključivo hrvatski jezik. Muškog si roda.
+Kratki i jasni odgovori. Odgovaram na SVA pitanja.
+Kada korisnik kaže "hvala", "to je sve", "doviđenja" - pozovi end_conversation().
+Potvrdi svaku izvršenu akciju kratko."""
+        else:
+            self.system_instruction = "You are a helpful home assistant. Control devices and answer questions."
+
+        # STT state
+        self.transcript_queue: asyncio.Queue = asyncio.Queue()
+        self.soniox_ws = None
+        self.soniox_session = None
+
+    async def start(self) -> None:
+        """Start the hybrid pipeline."""
+        logger.info(f"Starting Hybrid session {self.session_id}")
+        self.active = True
+
+        try:
+            async with asyncio.TaskGroup() as tg:
+                tg.create_task(self._stt_stream_loop())
+                tg.create_task(self._orchestrator_loop())
+                await asyncio.sleep(0)
+
+                while self.active:
+                    await asyncio.sleep(0.1)
+
+                raise asyncio.CancelledError("Session ended")
+
+        except asyncio.CancelledError:
+            logger.debug("Hybrid session cancelled normally")
+        except Exception as e:
+            logger.error(f"Error in Hybrid session: {e}", exc_info=True)
+        finally:
+            self.active = False
+            if self.soniox_ws and not self.soniox_ws.closed:
+                await self.soniox_ws.close()
+            if self.soniox_session:
+                await self.soniox_session.close()
+            logger.info(f"Hybrid session {self.session_id} terminated")
+
+    async def _stt_stream_loop(self):
+        """Stream mic audio to Soniox STT, emit transcripts."""
+        try:
+            self.soniox_session = aiohttp.ClientSession()
+            self.soniox_ws = await self.soniox_session.ws_connect(SONIOX_WS_URL)
+            logger.info("Connected to Soniox STT")
+
+            # Send config
+            stt_config = {
+                "api_key": self.soniox_api_key,
+                "model": "stt-rt-preview",
+                "language_hints": ["hr", "en"],
+                "enable_endpoint_detection": True,
+                "include_nonfinal": True,
+                "sample_rate_hertz": 16000,
+                "encoding": "pcm_s16le",
+                "num_audio_channels": 1,
+            }
+            await self.soniox_ws.send_json(stt_config)
+            logger.info("Soniox config sent")
+
+            # Start two subtasks: send audio + receive transcripts
+            async with asyncio.TaskGroup() as tg:
+                tg.create_task(self._stt_send_audio())
+                tg.create_task(self._stt_receive_transcripts())
+
+                while self.active:
+                    await asyncio.sleep(0.1)
+                raise asyncio.CancelledError()
+
+        except asyncio.CancelledError:
+            pass
+        except Exception as e:
+            logger.error(f"Soniox STT error: {e}", exc_info=True)
+
+    async def _stt_send_audio(self):
+        """Send device audio to Soniox."""
+        chunks = 0
+        keepalive_interval = 15  # seconds
+        last_keepalive = asyncio.get_event_loop().time()
+
+        try:
+            while self.active:
+                try:
+                    audio_data = await asyncio.wait_for(
+                        self.audio_out_queue.get(), timeout=1.0
+                    )
+                except asyncio.TimeoutError:
+                    # Send keepalive
+                    now = asyncio.get_event_loop().time()
+                    if now - last_keepalive > keepalive_interval:
+                        await self.soniox_ws.send_json({"type": "keepalive"})
+                        last_keepalive = now
+                    continue
+
+                if audio_data is None:
+                    break
+
+                # Convert: stereo 32-bit -> mono 16-bit (16kHz, perfect for Soniox)
+                mono_audio = self.convert_device_audio(audio_data)
+                await self.soniox_ws.send_bytes(mono_audio)
+                chunks += 1
+
+                if chunks % 100 == 0:
+                    logger.info(f"Sent {chunks} audio chunks to Soniox")
+
+        except Exception as e:
+            logger.error(f"Error sending to Soniox: {e}", exc_info=True)
+        finally:
+            logger.info(f"STT send ended, {chunks} chunks")
+
+    async def _stt_receive_transcripts(self):
+        """Receive transcripts from Soniox."""
+        current_text = ""
+        try:
+            async for msg in self.soniox_ws:
+                if not self.active:
+                    break
+
+                if msg.type == aiohttp.WSMsgType.TEXT:
+                    data = json.loads(msg.data)
+
+                    # Soniox sends tokens with isFinal flag
+                    tokens = data.get("tokens", [])
+                    for token in tokens:
+                        word = token.get("text", "")
+                        is_final = token.get("is_final", False)
+                        current_text += word
+
+                        # Check for endpoint detection (<end> token)
+                        if word == "<end>" or is_final:
+                            clean_text = current_text.replace("<end>", "").strip()
+                            if clean_text:
+                                logger.info(f"STT transcript: '{clean_text}'")
+                                await self.transcript_queue.put(clean_text)
+                            current_text = ""
+
+                    # Also check top-level finished flag
+                    if data.get("finished"):
+                        clean_text = current_text.strip()
+                        if clean_text:
+                            logger.info(f"STT final: '{clean_text}'")
+                            await self.transcript_queue.put(clean_text)
+                        current_text = ""
+
+                elif msg.type in (aiohttp.WSMsgType.CLOSED, aiohttp.WSMsgType.ERROR):
+                    logger.info("Soniox WebSocket closed")
+                    break
+
+        except Exception as e:
+            logger.error(f"Error receiving from Soniox: {e}", exc_info=True)
+
+    async def _orchestrator_loop(self):
+        """Process transcripts: LLM query -> tool calls -> TTS -> audio output."""
+        try:
+            logger.info("Orchestrator loop started")
+            while self.active:
+                try:
+                    transcript = await asyncio.wait_for(
+                        self.transcript_queue.get(), timeout=1.0
+                    )
+                except asyncio.TimeoutError:
+                    continue
+
+                logger.info(f"Processing transcript: '{transcript}'")
+
+                # Add user message to history
+                self.conversation_history.append({"role": "user", "content": transcript})
+
+                # Query LLM with function calling
+                response_text, tool_calls = await self._query_llm()
+
+                # Handle tool calls
+                if tool_calls:
+                    for tc in tool_calls:
+                        result = await self.execute_tool(tc["name"], tc["args"])
+                        self.conversation_history.append({
+                            "role": "assistant",
+                            "content": f"[Called {tc['name']}: {json.dumps(result)}]"
+                        })
+                        if not self.active:
+                            return
+
+                    # Get follow-up response after tool calls
+                    response_text, _ = await self._query_llm()
+
+                if response_text:
+                    logger.info(f"LLM response: '{response_text}'")
+                    self.conversation_history.append({"role": "assistant", "content": response_text})
+
+                    # Convert to speech
+                    audio_data = await self._text_to_speech(response_text)
+                    if audio_data:
+                        # Split into chunks for streaming to device
+                        chunk_size = 4800  # 100ms at 24kHz 16-bit
+                        for i in range(0, len(audio_data), chunk_size):
+                            chunk = audio_data[i:i + chunk_size]
+                            self.audio_in_queue.put_nowait(chunk)
+
+        except Exception as e:
+            logger.error(f"Orchestrator error: {e}", exc_info=True)
+        finally:
+            logger.info("Orchestrator loop ended")
+
+    async def _query_llm(self) -> tuple[str, list]:
+        """Query text LLM with conversation history and tools.
+
+        Returns (response_text, tool_calls) where tool_calls is a list of
+        {"name": str, "args": dict}.
+        """
+        if self.llm_provider_name == "openai":
+            return await self._query_openai_text()
+        else:
+            return await self._query_gemini_text()
+
+    async def _query_gemini_text(self) -> tuple[str, list]:
+        """Query Gemini text API with function calling."""
+        from google import genai
+        from google.genai import types
+
+        api_key = self.config.get("gemini_api_key")
+        if not api_key:
+            return "API key not configured", []
+
+        client = genai.Client(api_key=api_key)
+
+        # Build contents from history
+        contents = []
+        for msg in self.conversation_history:
+            role = "user" if msg["role"] == "user" else "model"
+            contents.append(types.Content(
+                parts=[types.Part.from_text(text=msg["content"])],
+                role=role
+            ))
+
+        try:
+            response = await client.aio.models.generate_content(
+                model="gemini-2.0-flash",
+                contents=contents,
+                config=types.GenerateContentConfig(
+                    system_instruction=self.system_instruction,
+                    tools=self.tool_registry.to_gemini_tools(),
+                    temperature=0.6,
+                )
+            )
+
+            # Check for function calls
+            tool_calls = []
+            if response.candidates and response.candidates[0].content:
+                for part in response.candidates[0].content.parts:
+                    if hasattr(part, 'function_call') and part.function_call:
+                        fc = part.function_call
+                        tool_calls.append({
+                            "name": fc.name,
+                            "args": dict(fc.args) if fc.args else {}
+                        })
+
+            # Get text response
+            text = response.text if hasattr(response, 'text') and response.text else ""
+            return text, tool_calls
+
+        except Exception as e:
+            logger.error(f"Gemini text query error: {e}", exc_info=True)
+            return f"Error: {e}", []
+
+    async def _query_openai_text(self) -> tuple[str, list]:
+        """Query OpenAI text API with function calling."""
+        api_key = self.config.get("openai_api_key")
+        if not api_key:
+            return "API key not configured", []
+
+        messages = [{"role": "system", "content": self.system_instruction}]
+        messages.extend(self.conversation_history)
+
+        # Convert tools to OpenAI chat format
+        tools = []
+        for t in self.tool_registry.all_tools():
+            tools.append({
+                "type": "function",
+                "function": {
+                    "name": t.name,
+                    "description": t.description,
+                    "parameters": t.parameters_schema,
+                }
+            })
+
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.post(
+                    "https://api.openai.com/v1/chat/completions",
+                    headers={
+                        "Authorization": f"Bearer {api_key}",
+                        "Content-Type": "application/json",
+                    },
+                    json={
+                        "model": "gpt-4o",
+                        "messages": messages,
+                        "tools": tools,
+                        "tool_choice": "auto",
+                        "temperature": 0.6,
+                    },
+                    timeout=aiohttp.ClientTimeout(total=15),
+                ) as resp:
+                    data = await resp.json()
+
+            choice = data.get("choices", [{}])[0]
+            message = choice.get("message", {})
+
+            # Check for tool calls
+            tool_calls = []
+            if message.get("tool_calls"):
+                for tc in message["tool_calls"]:
+                    func = tc.get("function", {})
+                    try:
+                        args = json.loads(func.get("arguments", "{}"))
+                    except json.JSONDecodeError:
+                        args = {}
+                    tool_calls.append({"name": func.get("name", ""), "args": args})
+
+            text = message.get("content", "") or ""
+            return text, tool_calls
+
+        except Exception as e:
+            logger.error(f"OpenAI text query error: {e}", exc_info=True)
+            return f"Error: {e}", []
+
+    async def _text_to_speech(self, text: str) -> Optional[bytes]:
+        """Convert text to speech using Google Cloud TTS REST API.
+
+        Returns 24kHz 16-bit mono PCM audio bytes (LINEAR16).
+        """
+        api_key = self.tts_api_key
+        if not api_key:
+            logger.error("No TTS API key configured")
+            return None
+
+        # Determine language from personality
+        croatian = self.config.get("croatian_personality", True)
+        language_code = "hr-HR" if croatian else "en-US"
+        voice_name = f"{language_code}-Standard-A"
+
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.post(
+                    f"{GOOGLE_TTS_URL}?key={api_key}",
+                    json={
+                        "input": {"text": text},
+                        "voice": {
+                            "languageCode": language_code,
+                            "name": voice_name,
+                        },
+                        "audioConfig": {
+                            "audioEncoding": "LINEAR16",
+                            "sampleRateHertz": 24000,
+                        }
+                    },
+                    timeout=aiohttp.ClientTimeout(total=10),
+                ) as resp:
+                    if resp.status != 200:
+                        error = await resp.text()
+                        logger.error(f"TTS error: {resp.status} - {error}")
+                        return None
+
+                    data = await resp.json()
+                    audio_content = data.get("audioContent", "")
+                    if not audio_content:
+                        return None
+
+                    # Decode base64 audio
+                    raw_audio = base64.b64decode(audio_content)
+
+                    # Google TTS returns WAV with header, strip it (44 bytes)
+                    if raw_audio[:4] == b'RIFF':
+                        raw_audio = raw_audio[44:]
+
+                    logger.info(f"TTS generated {len(raw_audio)} bytes of audio")
+                    return raw_audio
+
+        except Exception as e:
+            logger.error(f"TTS error: {e}", exc_info=True)
+            return None

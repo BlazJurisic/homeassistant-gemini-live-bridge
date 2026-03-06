@@ -12,7 +12,9 @@ COPY requirements.txt /tmp/
 RUN pip3 install --break-system-packages --no-cache-dir -r /tmp/requirements.txt
 
 # Copy add-on files
-COPY run.py /
+COPY run.py audio.py ha_client.py device_connection.py /
+COPY providers/ /providers/
+COPY tools/ /tools/
 RUN chmod a+x /run.py
 
 CMD [ "python3", "/run.py" ]
