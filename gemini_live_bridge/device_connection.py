@@ -115,12 +115,16 @@ class DeviceConnection:
     async def send_to_device(self):
         """Send audio from provider to device, paced at real-time.
 
-        This is THE CLOCK - paces audio delivery at real-time speed.
-        The queue absorbs provider bursts, and we drain it steadily.
+        Uses monotonic clock for drift-free pacing. The queue absorbs
+        provider bursts, and we drain it at exactly the playback rate.
         """
         logger.info("send_to_device started")
         chunks_sent = 0
         bytes_sent = 0
+        bytes_since_clock_start = 0
+        clock_start = None
+        BYTES_PER_SEC = 48000.0  # 24kHz * 16-bit = 48000 bytes/sec
+
         try:
             while self.active:
                 if not self.provider:
@@ -134,9 +138,15 @@ class DeviceConnection:
                 except asyncio.TimeoutError:
                     if self.provider:
                         self.provider.playing = False
+                    clock_start = None  # Reset clock on gap
                     continue
 
                 self.provider.playing = True
+
+                # Start clock on first chunk of a new response
+                if clock_start is None:
+                    clock_start = asyncio.get_event_loop().time()
+                    bytes_since_clock_start = 0
 
                 # Send [length][data] to device
                 header = struct.pack('>I', len(data))
@@ -144,14 +154,19 @@ class DeviceConnection:
                 await self.writer.drain()
                 chunks_sent += 1
                 bytes_sent += len(data)
+                bytes_since_clock_start += len(data)
 
-                # Pace at real-time (24kHz 16-bit mono = 48000 bytes/sec)
-                chunk_duration = len(data) / 48000.0 * 0.9
-                await asyncio.sleep(chunk_duration)
+                # Drift-free pacing: sleep until we've caught up to real-time
+                target_time = clock_start + (bytes_since_clock_start / BYTES_PER_SEC)
+                now = asyncio.get_event_loop().time()
+                sleep_time = target_time - now
+                if sleep_time > 0:
+                    await asyncio.sleep(sleep_time)
 
                 # Mark not playing when queue is empty
                 if self.provider.audio_in_queue.empty():
                     self.provider.playing = False
+                    clock_start = None  # Reset clock for next response
 
                 if chunks_sent % 20 == 1:
                     qsize = self.provider.audio_in_queue.qsize()
