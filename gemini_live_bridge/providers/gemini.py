@@ -160,7 +160,15 @@ Ti: [pozovi end_conversation()] "Doviđenja!"
                 async for response in turn:
                     if data := response.data:
                         chunks += 1
-                        self.audio_in_queue.put_nowait(data)
+                        try:
+                            self.audio_in_queue.put_nowait(data)
+                        except asyncio.QueueFull:
+                            # Drop oldest to make room
+                            try:
+                                self.audio_in_queue.get_nowait()
+                            except asyncio.QueueEmpty:
+                                pass
+                            self.audio_in_queue.put_nowait(data)
                         continue
 
                     if text := response.text:
