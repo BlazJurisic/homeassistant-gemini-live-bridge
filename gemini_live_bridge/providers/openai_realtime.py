@@ -191,8 +191,9 @@ PRAVILA RAZGOVORA:
                             audio_data = base64.b64decode(audio_b64)
                             # Accumulate small deltas into larger chunks for smoother playback
                             self._audio_accumulator += audio_data
-                            # Flush when we have ~100ms of audio (4800 bytes at 24kHz 16-bit mono)
-                            if len(self._audio_accumulator) >= 4800:
+                            # Flush at ~200ms of audio (9600 bytes at 24kHz 16-bit mono)
+                            # Larger chunks = fewer TCP messages = smoother playback
+                            if len(self._audio_accumulator) >= 9600:
                                 try:
                                     self.audio_in_queue.put_nowait(self._audio_accumulator)
                                 except asyncio.QueueFull:
