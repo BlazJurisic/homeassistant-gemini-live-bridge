@@ -176,8 +176,7 @@ class GeminiSession:
         self.audio_out_queue = asyncio.Queue(maxsize=50)
         self.session = None
         self.active = False
-        self.playing = False  # True while sending audio to speaker
-        self.protocol_version = 1  # Set by DeviceConnection after protocol detection
+        self.playing = False  # True while sending audio to speaker (mute mic)
 
         # System instructions
         if CROATIAN_PERSONALITY:
@@ -361,33 +360,26 @@ Ti: [pozovi end_conversation()] "Doviđenja!"
         """Background task to send audio from device to Gemini"""
         chunks_to_gemini = 0
         try:
-            logger.info(f"send_audio_to_gemini task started (protocol_version={self.protocol_version})")
+            logger.info("send_audio_to_gemini task started")
             while self.active:
                 audio_data = await self.audio_out_queue.get()
                 if audio_data is None:
                     break
 
-                if self.protocol_version == 2:
-                    # AEC mode: already 16kHz 16-bit mono from ESP32 SpeexDSP
-                    chunks_to_gemini += 1
-                    if chunks_to_gemini % 50 == 0:
-                        samples = np.frombuffer(audio_data, dtype='<i2')
-                        peak = int(np.abs(samples).max()) if len(samples) > 0 else 0
-                        playing = "SPEAKER_ON" if self.playing else "speaker_off"
-                        logger.info(f"MIC(AEC) #{chunks_to_gemini}: peak={peak} [{playing}]")
-                else:
-                    # Legacy: convert stereo 32-bit → mono 16-bit
-                    raw_audio = audio_data
-                    if DEVICE_BITS_PER_SAMPLE == 32:
-                        audio_data = convert_32bit_to_16bit(audio_data)
+                # Convert stereo 32-bit I2S → mono 16-bit PCM
+                raw_audio = audio_data  # save for logging
+                if DEVICE_BITS_PER_SAMPLE == 32:
+                    audio_data = convert_32bit_to_16bit(audio_data)
 
-                    chunks_to_gemini += 1
-                    if chunks_to_gemini % 50 == 0:
-                        raw_samples = np.frombuffer(raw_audio, dtype='<i4') if len(raw_audio) % 4 == 0 else np.array([])
-                        if len(raw_samples) >= 2:
-                            p0 = int(np.abs(raw_samples[0::2] >> 16).max())
-                            playing = "SPEAKER_ON" if self.playing else "speaker_off"
-                            logger.info(f"MIC #{chunks_to_gemini}: L={p0} [{playing}]")
+                # Log mic levels
+                chunks_to_gemini += 1
+                if chunks_to_gemini % 50 == 0:
+                    raw_samples = np.frombuffer(raw_audio, dtype='<i4') if len(raw_audio) % 4 == 0 else np.array([])
+                    if len(raw_samples) >= 2:
+                        p0 = int(np.abs(raw_samples[0::2] >> 16).max())
+                        p1 = int(np.abs(raw_samples[1::2] >> 16).max())
+                        playing = "SPEAKER_ON" if self.playing else "speaker_off"
+                        logger.info(f"MIC #{chunks_to_gemini}: L={p0} R={p1} [{playing}]")
 
                 await self.session.send_realtime_input(audio={"data": audio_data, "mime_type": "audio/pcm"})
             logger.info("Exited send loop, session no longer active")
@@ -505,7 +497,6 @@ class DeviceConnection:
 
         self.gemini_session: Optional[GeminiSession] = None
         self.active = False
-        self.protocol_version = 1  # 1=legacy stereo 32-bit, 2=AFE mono 16-bit
 
     async def handle(self):
         """Handle device connection"""
@@ -570,35 +561,6 @@ class DeviceConnection:
         chunks_from_device = 0
         try:
             logger.info("receive_from_device task started")
-
-            # Detect protocol version byte from device
-            # ESP32 sends 0x01 (legacy) or 0x02 (AFE) before audio stream
-            # Legacy devices (no version byte) send length header directly (first byte is 0x00)
-            first_byte = await self.reader.readexactly(1)
-            if first_byte[0] in (0x01, 0x02):
-                self.protocol_version = first_byte[0]
-                logger.info(f"Device protocol version: {self.protocol_version} ({'AFE mono 16-bit' if self.protocol_version == 2 else 'legacy stereo 32-bit'})")
-            else:
-                # Legacy device - first byte is part of the length header
-                self.protocol_version = 1
-                logger.info("Device protocol version: 1 (legacy, no version byte)")
-                # Read remaining 3 bytes of the first length header
-                rest = await self.reader.readexactly(3)
-                length_data = first_byte + rest
-                length = struct.unpack('>I', length_data)[0]
-                if length == 0:
-                    logger.info("Received end signal from device")
-                    self.active = False
-                    return
-                audio_data = await self.reader.readexactly(length)
-                chunks_from_device += 1
-                if self.gemini_session:
-                    await self.gemini_session.audio_out_queue.put(audio_data)
-
-            # Pass protocol version to Gemini session for audio conversion
-            if self.gemini_session:
-                self.gemini_session.protocol_version = self.protocol_version
-
             while self.active:
                 # Read length header (4 bytes)
                 length_data = await self.reader.readexactly(4)
