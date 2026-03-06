@@ -143,8 +143,20 @@ class DeviceConnection:
 
                 self.provider.playing = True
 
-                # Start clock on first chunk of a new response
+                # On new response, prefill: collect chunks for ~300ms before sending
+                # This ensures the ESP32 speaker buffer has enough to start smoothly
                 if clock_start is None:
+                    prefill = data
+                    prefill_target = int(BYTES_PER_SEC * 0.3)  # 300ms = 14400 bytes
+                    while len(prefill) < prefill_target:
+                        try:
+                            more = await asyncio.wait_for(
+                                self.provider.audio_in_queue.get(), timeout=0.15
+                            )
+                            prefill += more
+                        except asyncio.TimeoutError:
+                            break  # No more data coming, send what we have
+                    data = prefill
                     clock_start = asyncio.get_event_loop().time()
                     bytes_since_clock_start = 0
 
