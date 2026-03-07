@@ -180,39 +180,27 @@ PRAVILA RAZGOVORA:
                     event_type = event.get("type", "")
 
                     if event_type == "response.audio.delta":
-                        # Decode base64 audio, accumulate to Gemini-like chunk sizes
+                        # Accumulate all audio for this response
                         audio_b64 = event.get("delta", "")
                         if audio_b64:
-                            audio_data = base64.b64decode(audio_b64)
-                            self._audio_accumulator += audio_data
-                            # Flush at ~40ms chunks (1920B) - same as Gemini's natural size
-                            while len(self._audio_accumulator) >= 1920:
-                                chunk = self._audio_accumulator[:1920]
-                                self._audio_accumulator = self._audio_accumulator[1920:]
-                                try:
-                                    self.audio_in_queue.put_nowait(chunk)
-                                except asyncio.QueueFull:
-                                    try:
-                                        self.audio_in_queue.get_nowait()
-                                    except asyncio.QueueEmpty:
-                                        pass
-                                    self.audio_in_queue.put_nowait(chunk)
-                                audio_chunks += 1
+                            self._audio_accumulator += base64.b64decode(audio_b64)
+                            audio_chunks += 1
 
                     elif event_type == "response.audio.done":
-                        # Flush remaining - pad to full chunk to avoid runt
+                        # Send entire response as ONE queue entry.
+                        # The ESP32 PLAYING state machine handles pacing internally.
+                        # Bridge send_to_device paces the TCP send at real-time.
                         if self._audio_accumulator:
-                            # Pad with silence to avoid tiny runt chunk
-                            remainder = self._audio_accumulator
-                            if len(remainder) < 1920:
-                                remainder += b'\x00' * (1920 - len(remainder))
                             try:
-                                self.audio_in_queue.put_nowait(remainder)
+                                self.audio_in_queue.put_nowait(self._audio_accumulator)
                             except asyncio.QueueFull:
-                                pass
+                                try:
+                                    self.audio_in_queue.get_nowait()
+                                except asyncio.QueueEmpty:
+                                    pass
+                                self.audio_in_queue.put_nowait(self._audio_accumulator)
+                            logger.info(f"Audio response queued: {len(self._audio_accumulator)}B from {audio_chunks} deltas")
                             self._audio_accumulator = b""
-                            audio_chunks += 1
-                        logger.info(f"Audio response complete, {audio_chunks} chunks")
                         audio_chunks = 0
 
                     elif event_type == "response.audio_transcript.delta":
