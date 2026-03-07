@@ -143,10 +143,10 @@ class DeviceConnection:
 
                 self.provider.playing = True
 
-                # Coalesce: if more chunks are queued, merge them into one
-                # TCP message. Reduces TCP overhead and fills ESP32 buffer
-                # in fewer, larger writes. Cap at ~500ms (24000 bytes) to
-                # keep latency reasonable.
+                # Coalesce: wait briefly then grab all queued chunks.
+                # OpenAI bursts many small deltas - give them time to arrive.
+                # Gemini streams in real-time so queue is usually empty (no-op).
+                await asyncio.sleep(0.02)  # 20ms wait for more chunks to arrive
                 while not self.provider.audio_in_queue.empty() and len(data) < 24000:
                     try:
                         more = self.provider.audio_in_queue.get_nowait()
