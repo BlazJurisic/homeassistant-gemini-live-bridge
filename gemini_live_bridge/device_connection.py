@@ -150,9 +150,14 @@ class DeviceConnection:
                 chunks_sent += 1
                 bytes_sent += len(data)
 
-                # Pace at 90% of real-time
+                # Pace sending to match real-time playback.
+                # 0.9x works for Gemini (real-time stream, need to stay ahead).
+                # 1.0x for burst providers (OpenAI) to avoid overwhelming ESP32
+                # mixer ring buffer which is only ~19KB/100ms.
+                from providers.gemini import GeminiProvider
+                pace = 0.9 if isinstance(self.provider, GeminiProvider) else 1.0
                 chunk_duration = len(data) / BYTES_PER_SEC
-                await asyncio.sleep(chunk_duration * 0.9)
+                await asyncio.sleep(chunk_duration * pace)
 
                 # Mark not playing when queue is empty
                 if self.provider.audio_in_queue.empty():
