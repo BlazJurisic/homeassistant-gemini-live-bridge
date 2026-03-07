@@ -187,19 +187,27 @@ PRAVILA RAZGOVORA:
                             audio_chunks += 1
 
                     elif event_type == "response.audio.done":
-                        # Send entire response as ONE queue entry.
-                        # The ESP32 PLAYING state machine handles pacing internally.
-                        # Bridge send_to_device paces the TCP send at real-time.
+                        # Split into chunks that fit ESP32 recv buffer (max 49152B).
+                        # Use ~24KB chunks to leave headroom. This matches Gemini's
+                        # natural chunk sizes and the ESP32 PLAYING state machine.
                         if self._audio_accumulator:
-                            try:
-                                self.audio_in_queue.put_nowait(self._audio_accumulator)
-                            except asyncio.QueueFull:
+                            CHUNK_MAX = 24000  # ~500ms at 24kHz 16-bit mono
+                            total = len(self._audio_accumulator)
+                            offset = 0
+                            queued = 0
+                            while offset < total:
+                                chunk = self._audio_accumulator[offset:offset + CHUNK_MAX]
+                                offset += len(chunk)
                                 try:
-                                    self.audio_in_queue.get_nowait()
-                                except asyncio.QueueEmpty:
-                                    pass
-                                self.audio_in_queue.put_nowait(self._audio_accumulator)
-                            logger.info(f"Audio response queued: {len(self._audio_accumulator)}B from {audio_chunks} deltas")
+                                    self.audio_in_queue.put_nowait(chunk)
+                                except asyncio.QueueFull:
+                                    try:
+                                        self.audio_in_queue.get_nowait()
+                                    except asyncio.QueueEmpty:
+                                        pass
+                                    self.audio_in_queue.put_nowait(chunk)
+                                queued += 1
+                            logger.info(f"Audio response: {total}B from {audio_chunks} deltas -> {queued} chunks")
                             self._audio_accumulator = b""
                         audio_chunks = 0
 
