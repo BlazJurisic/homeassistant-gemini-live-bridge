@@ -143,6 +143,17 @@ class DeviceConnection:
 
                 self.provider.playing = True
 
+                # Coalesce: if more chunks are queued, merge them into one
+                # TCP message. Reduces TCP overhead and fills ESP32 buffer
+                # in fewer, larger writes. Cap at ~500ms (24000 bytes) to
+                # keep latency reasonable.
+                while not self.provider.audio_in_queue.empty() and len(data) < 24000:
+                    try:
+                        more = self.provider.audio_in_queue.get_nowait()
+                        data += more
+                    except asyncio.QueueEmpty:
+                        break
+
                 # Send [length][data] to device
                 header = struct.pack('>I', len(data))
                 self.writer.write(header + data)
