@@ -143,25 +143,14 @@ class DeviceConnection:
 
                 self.provider.playing = True
 
-                # Coalesce: wait briefly then grab all queued chunks.
-                # OpenAI bursts many small deltas - give them time to arrive.
-                # Gemini streams in real-time so queue is usually empty (no-op).
-                await asyncio.sleep(0.02)  # 20ms wait for more chunks to arrive
-                while not self.provider.audio_in_queue.empty() and len(data) < 24000:
-                    try:
-                        more = self.provider.audio_in_queue.get_nowait()
-                        data += more
-                    except asyncio.QueueEmpty:
-                        break
-
-                # Send [length][data] to device
+                # Send entire chunk as one TCP message (like original code)
                 header = struct.pack('>I', len(data))
                 self.writer.write(header + data)
                 await self.writer.drain()
                 chunks_sent += 1
                 bytes_sent += len(data)
 
-                # Pace at 90% of real-time (proven formula from original bridge)
+                # Pace at 90% of real-time
                 chunk_duration = len(data) / BYTES_PER_SEC
                 await asyncio.sleep(chunk_duration * 0.9)
 

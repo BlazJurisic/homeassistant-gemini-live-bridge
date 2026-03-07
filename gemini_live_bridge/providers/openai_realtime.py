@@ -180,23 +180,38 @@ PRAVILA RAZGOVORA:
                     event_type = event.get("type", "")
 
                     if event_type == "response.audio.delta":
-                        # Decode base64 audio, queue for device
+                        # Decode base64 audio, accumulate to Gemini-like chunk sizes
                         audio_b64 = event.get("delta", "")
                         if audio_b64:
                             audio_data = base64.b64decode(audio_b64)
-                            # Queue raw deltas directly - let send_to_device coalesce
-                            # This matches Gemini's pattern (put_nowait raw chunks)
-                            try:
-                                self.audio_in_queue.put_nowait(audio_data)
-                            except asyncio.QueueFull:
+                            self._audio_accumulator += audio_data
+                            # Flush at ~40ms chunks (1920B) - same as Gemini's natural size
+                            while len(self._audio_accumulator) >= 1920:
+                                chunk = self._audio_accumulator[:1920]
+                                self._audio_accumulator = self._audio_accumulator[1920:]
                                 try:
-                                    self.audio_in_queue.get_nowait()
-                                except asyncio.QueueEmpty:
-                                    pass
-                                self.audio_in_queue.put_nowait(audio_data)
-                            audio_chunks += 1
+                                    self.audio_in_queue.put_nowait(chunk)
+                                except asyncio.QueueFull:
+                                    try:
+                                        self.audio_in_queue.get_nowait()
+                                    except asyncio.QueueEmpty:
+                                        pass
+                                    self.audio_in_queue.put_nowait(chunk)
+                                audio_chunks += 1
 
                     elif event_type == "response.audio.done":
+                        # Flush remaining - pad to full chunk to avoid runt
+                        if self._audio_accumulator:
+                            # Pad with silence to avoid tiny runt chunk
+                            remainder = self._audio_accumulator
+                            if len(remainder) < 1920:
+                                remainder += b'\x00' * (1920 - len(remainder))
+                            try:
+                                self.audio_in_queue.put_nowait(remainder)
+                            except asyncio.QueueFull:
+                                pass
+                            self._audio_accumulator = b""
+                            audio_chunks += 1
                         logger.info(f"Audio response complete, {audio_chunks} chunks")
                         audio_chunks = 0
 
