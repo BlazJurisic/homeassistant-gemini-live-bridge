@@ -113,18 +113,20 @@ class DeviceConnection:
             logger.info(f"receive_from_device ended, {chunks} chunks")
 
     async def send_to_device(self):
-        """Send audio from provider to device, paced at real-time.
+        """Send audio from provider to device with drift-free pacing.
 
-        Uses the original proven pacing: sleep for chunk_duration * 0.9 after
-        each send. This works because:
-        - Gemini streams in near-real-time, so 0.9x keeps buffer topped up
-        - OpenAI bursts, so 0.9x drains the queue steadily
-        The ESP32 has a 2-second speaker buffer that absorbs any jitter.
+        Uses a monotonic clock to track cumulative bytes sent vs elapsed time.
+        Paces at exactly 0.9x real-time without per-chunk sleep jitter.
+        The clock resets when queue empties (end of response).
         """
         logger.info("send_to_device started")
         chunks_sent = 0
         bytes_sent = 0
         BYTES_PER_SEC = 48000.0  # 24kHz * 16-bit = 48000 bytes/sec
+        PACE = 0.9  # send 10% ahead of real-time
+
+        clock_start = None
+        clock_bytes = 0
 
         try:
             while self.active:
@@ -137,19 +139,35 @@ class DeviceConnection:
                         self.provider.audio_in_queue.get(), timeout=1.0
                     )
                 except asyncio.TimeoutError:
-                    # No audio for 1 second - speaker done
                     if self.provider:
                         self.provider.playing = False
+                    clock_start = None
                     continue
+
+                loop = asyncio.get_event_loop()
+
+                # Start clock on first chunk of response
+                if clock_start is None:
+                    clock_start = loop.time()
+                    clock_bytes = 0
 
                 header = struct.pack('>I', len(data))
                 self.writer.write(header + data)
                 await self.writer.drain()
                 chunks_sent += 1
                 bytes_sent += len(data)
+                clock_bytes += len(data)
 
-                chunk_duration = len(data) / BYTES_PER_SEC
-                await asyncio.sleep(chunk_duration * 0.7)
+                # Drift-free: calculate exact target time for this many bytes
+                target = clock_start + (clock_bytes / BYTES_PER_SEC) * PACE
+                now = loop.time()
+                delay = target - now
+                if delay > 0.001:  # only sleep if > 1ms
+                    await asyncio.sleep(delay)
+
+                # Reset clock when queue drains (response ended)
+                if self.provider.audio_in_queue.empty():
+                    clock_start = None
 
                 if chunks_sent % 20 == 1:
                     qsize = self.provider.audio_in_queue.qsize()
