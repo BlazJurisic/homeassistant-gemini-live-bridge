@@ -142,12 +142,8 @@ class DeviceConnection:
                         self.provider.playing = False
                     continue
 
-                # Coalesce small queued chunks into larger TCP messages.
-                # OpenAI streams many 1920B chunks; sending each individually
-                # causes choppiness. Collect for up to 100ms then send as one.
-                # Gemini sends larger natural chunks so this is mostly a no-op.
-                # Cap at 24000B to stay under ESP32's 49KB recv buffer.
-                await asyncio.sleep(0.1)  # Let more chunks arrive
+                # Grab any additional queued chunks without waiting (no sleep).
+                # This coalesces burst arrivals but doesn't add latency.
                 while not self.provider.audio_in_queue.empty() and len(data) < 24000:
                     try:
                         more = self.provider.audio_in_queue.get_nowait()
@@ -155,7 +151,7 @@ class DeviceConnection:
                     except asyncio.QueueEmpty:
                         break
 
-                # Send coalesced chunk
+                # Send immediately - ESP32 needs audio ASAP for mic muting
                 header = struct.pack('>I', len(data))
                 self.writer.write(header + data)
                 await self.writer.drain()

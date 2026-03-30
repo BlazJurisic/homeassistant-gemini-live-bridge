@@ -147,6 +147,13 @@ PRAVILA RAZGOVORA:
                 if audio_data is None:
                     break
 
+                # Half-duplex: don't send mic audio while speaker is playing.
+                # This prevents OpenAI from hearing its own output and
+                # self-interrupting. The ESP32 also mutes mic but there's
+                # TCP latency before that kicks in.
+                if self.playing:
+                    continue
+
                 # Convert: stereo 32-bit 16kHz -> mono 16-bit 24kHz
                 pcm_24k = self.convert_device_audio(audio_data)
 
