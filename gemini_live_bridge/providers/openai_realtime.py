@@ -187,38 +187,31 @@ PRAVILA RAZGOVORA:
                     event_type = event.get("type", "")
 
                     if event_type == "response.audio.delta":
-                        # OpenAI sends large variable chunks (4800-26400B).
-                        # Split into exact 1920B pieces to match Gemini's size.
-                        # Carry remainder to next delta to avoid runt chunks.
+                        # Accumulate audio. Set playing immediately for mic mute.
                         self.playing = True
                         audio_b64 = event.get("delta", "")
                         if audio_b64:
                             self._audio_accumulator += base64.b64decode(audio_b64)
-                            # Emit only full 1920B chunks, keep remainder
-                            while len(self._audio_accumulator) >= 1920:
-                                chunk = self._audio_accumulator[:1920]
-                                self._audio_accumulator = self._audio_accumulator[1920:]
-                                try:
-                                    self.audio_in_queue.put_nowait(chunk)
-                                except asyncio.QueueFull:
-                                    try:
-                                        self.audio_in_queue.get_nowait()
-                                    except asyncio.QueueEmpty:
-                                        pass
-                                    self.audio_in_queue.put_nowait(chunk)
                             audio_chunks += 1
 
                     elif event_type == "response.audio.done":
-                        # Pad and flush any remainder
+                        # Got complete response. Now split into even chunks and
+                        # queue them sequentially. No race conditions, strict order.
                         if self._audio_accumulator:
-                            # Pad with silence to full 1920B
-                            padded = self._audio_accumulator + b'\x00' * (1920 - len(self._audio_accumulator))
-                            try:
-                                self.audio_in_queue.put_nowait(padded)
-                            except asyncio.QueueFull:
-                                pass
+                            total = len(self._audio_accumulator)
+                            # Use 9600B chunks (~200ms at 24kHz) - large enough to
+                            # avoid TCP overhead, small enough for ESP32 recv buffer.
+                            CHUNK = 9600
+                            queued = 0
+                            for i in range(0, total, CHUNK):
+                                chunk = self._audio_accumulator[i:i + CHUNK]
+                                # Pad last chunk to even size (avoid runt)
+                                if len(chunk) < CHUNK:
+                                    chunk += b'\x00' * (CHUNK - len(chunk))
+                                await self.audio_in_queue.put(chunk)  # blocking put, preserves order
+                                queued += 1
+                            logger.info(f"Audio response: {total}B, {audio_chunks} deltas -> {queued} chunks of {CHUNK}B")
                             self._audio_accumulator = b""
-                        logger.info(f"Audio response complete, {audio_chunks} deltas")
                         audio_chunks = 0
 
                     elif event_type == "response.audio_transcript.delta":
