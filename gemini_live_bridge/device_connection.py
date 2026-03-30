@@ -142,17 +142,31 @@ class DeviceConnection:
                         self.provider.playing = False
                     continue
 
-                # Send chunk and pace at 90% of real-time.
-                # 9600B chunk = 200ms audio, sleep 180ms.
-                # This keeps the ESP32 speaker buffer slightly ahead.
+                # Burst-send: send 2 chunks back-to-back, then pace.
+                # This keeps the ESP32 I2S buffer always 1 chunk ahead,
+                # absorbing any TCP/sleep jitter.
                 header = struct.pack('>I', len(data))
                 self.writer.write(header + data)
                 await self.writer.drain()
                 chunks_sent += 1
                 bytes_sent += len(data)
 
+                # Immediately send next chunk too (if available) without sleeping
+                if not self.provider.audio_in_queue.empty():
+                    try:
+                        data2 = self.provider.audio_in_queue.get_nowait()
+                        header2 = struct.pack('>I', len(data2))
+                        self.writer.write(header2 + data2)
+                        await self.writer.drain()
+                        chunks_sent += 1
+                        bytes_sent += len(data2)
+                        data = data2  # use second chunk's size for pacing
+                    except asyncio.QueueEmpty:
+                        pass
+
+                # Sleep for ~1 chunk duration (the ESP32 now has 2 chunks buffered)
                 chunk_duration = len(data) / BYTES_PER_SEC
-                await asyncio.sleep(chunk_duration * 0.8)
+                await asyncio.sleep(chunk_duration * 0.9)
 
                 if chunks_sent % 20 == 1:
                     qsize = self.provider.audio_in_queue.qsize()
