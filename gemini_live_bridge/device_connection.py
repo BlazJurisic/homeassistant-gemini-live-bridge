@@ -142,23 +142,15 @@ class DeviceConnection:
                         self.provider.playing = False
                     continue
 
-                # Grab any additional queued chunks without waiting (no sleep).
-                # This coalesces burst arrivals but doesn't add latency.
-                while not self.provider.audio_in_queue.empty() and len(data) < 24000:
-                    try:
-                        more = self.provider.audio_in_queue.get_nowait()
-                        data += more
-                    except asyncio.QueueEmpty:
-                        break
-
-                # Send immediately - ESP32 needs audio ASAP for mic muting
+                # Send chunk directly - no coalescing.
+                # Matches exactly how Gemini works (proven smooth).
                 header = struct.pack('>I', len(data))
                 self.writer.write(header + data)
                 await self.writer.drain()
                 chunks_sent += 1
                 bytes_sent += len(data)
 
-                # Pace at 90% of real-time
+                # Pace at 90% of real-time (proven with Gemini)
                 chunk_duration = len(data) / BYTES_PER_SEC
                 await asyncio.sleep(chunk_duration * 0.9)
 
