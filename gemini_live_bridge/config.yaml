@@ -1,5 +1,5 @@
 name: Voice Assistant Bridge
-version: "2.2.6"
+version: "2.2.7"
 slug: gemini_live_bridge
 description: Multi-provider full-duplex voice assistant bridge for ESP32 devices
 url: https://github.com/BlazJurisic/homeassistant-gemini-live-bridge

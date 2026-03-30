@@ -188,15 +188,14 @@ PRAVILA RAZGOVORA:
 
                     if event_type == "response.audio.delta":
                         # Stream as deltas arrive for low latency.
-                        # Accumulate to exact 9600B chunks (200ms) - no runts.
-                        # Remainder carries to next delta.
+                        # Accumulate to 19200B chunks (400ms) - fewer TCP messages,
+                        # fewer sleep calls = fewer micro-pauses from sleep jitter.
                         self.playing = True
                         audio_b64 = event.get("delta", "")
                         if audio_b64:
                             self._audio_accumulator += base64.b64decode(audio_b64)
                             audio_chunks += 1
-                            # Emit full 9600B chunks as they become available
-                            CHUNK = 9600
+                            CHUNK = 19200
                             while len(self._audio_accumulator) >= CHUNK:
                                 chunk = self._audio_accumulator[:CHUNK]
                                 self._audio_accumulator = self._audio_accumulator[CHUNK:]
@@ -210,9 +209,9 @@ PRAVILA RAZGOVORA:
                                     self.audio_in_queue.put_nowait(chunk)
 
                     elif event_type == "response.audio.done":
-                        # Flush remainder padded to 9600B
+                        # Flush remainder padded to 19200B
                         if self._audio_accumulator:
-                            CHUNK = 9600
+                            CHUNK = 19200
                             padded = self._audio_accumulator + b'\x00' * (CHUNK - len(self._audio_accumulator))
                             try:
                                 self.audio_in_queue.put_nowait(padded)
