@@ -180,24 +180,18 @@ PRAVILA RAZGOVORA:
                     event_type = event.get("type", "")
 
                     if event_type == "response.audio.delta":
-                        # Accumulate all audio for this response
+                        # Stream audio as it arrives (like Gemini does).
+                        # This keeps provider.playing=True so ESP32 mutes mic.
+                        # Accumulate to ~2KB chunks to avoid tiny TCP messages
+                        # but stay well under ESP32's 49KB recv buffer.
                         audio_b64 = event.get("delta", "")
                         if audio_b64:
                             self._audio_accumulator += base64.b64decode(audio_b64)
                             audio_chunks += 1
-
-                    elif event_type == "response.audio.done":
-                        # Split into chunks that fit ESP32 recv buffer (max 49152B).
-                        # Use ~24KB chunks to leave headroom. This matches Gemini's
-                        # natural chunk sizes and the ESP32 PLAYING state machine.
-                        if self._audio_accumulator:
-                            CHUNK_MAX = 24000  # ~500ms at 24kHz 16-bit mono
-                            total = len(self._audio_accumulator)
-                            offset = 0
-                            queued = 0
-                            while offset < total:
-                                chunk = self._audio_accumulator[offset:offset + CHUNK_MAX]
-                                offset += len(chunk)
+                            # Flush at ~2KB (similar to Gemini's natural ~1920B)
+                            while len(self._audio_accumulator) >= 1920:
+                                chunk = self._audio_accumulator[:1920]
+                                self._audio_accumulator = self._audio_accumulator[1920:]
                                 try:
                                     self.audio_in_queue.put_nowait(chunk)
                                 except asyncio.QueueFull:
@@ -206,9 +200,16 @@ PRAVILA RAZGOVORA:
                                     except asyncio.QueueEmpty:
                                         pass
                                     self.audio_in_queue.put_nowait(chunk)
-                                queued += 1
-                            logger.info(f"Audio response: {total}B from {audio_chunks} deltas -> {queued} chunks")
+
+                    elif event_type == "response.audio.done":
+                        # Flush remaining audio
+                        if self._audio_accumulator:
+                            try:
+                                self.audio_in_queue.put_nowait(self._audio_accumulator)
+                            except asyncio.QueueFull:
+                                pass
                             self._audio_accumulator = b""
+                        logger.info(f"Audio response complete, {audio_chunks} deltas")
                         audio_chunks = 0
 
                     elif event_type == "response.audio_transcript.delta":
