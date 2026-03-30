@@ -1,14 +1,14 @@
-"""Hybrid provider: Soniox STT + Text LLM + Google TTS.
+"""Hybrid provider: Soniox STT + OpenAI Realtime (text in, audio out).
 
-Pipeline: Mic audio -> Soniox (streaming STT) -> Text LLM (function calling) -> Google TTS -> Speaker
-Latency: ~1-3s (sequential), but supports any text LLM provider.
+Pipeline: Mic audio -> Soniox (streaming STT) -> OpenAI Realtime (text -> audio) -> Speaker
+Same as OpenAI Realtime provider but input is text from Soniox instead of raw audio.
 """
 
 import asyncio
 import base64
 import json
 import logging
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any, List
 
 import aiohttp
 
@@ -17,11 +17,17 @@ from .base import BaseProvider
 logger = logging.getLogger(__name__)
 
 SONIOX_WS_URL = "wss://stt-rt.soniox.com/transcribe-websocket"
-GOOGLE_TTS_URL = "https://texttospeech.googleapis.com/v1/text:synthesize"
+OPENAI_REALTIME_URL = "wss://api.openai.com/v1/realtime"
+DEFAULT_MODEL = "gpt-4o-realtime-preview"
 
 
 class HybridProvider(BaseProvider):
-    """Hybrid provider using separate STT + LLM + TTS pipeline."""
+    """Hybrid provider: Soniox STT feeds text into OpenAI Realtime API.
+
+    OpenAI Realtime handles LLM + TTS in one WebSocket, outputting streamed audio.
+    This gives us Soniox's superior multilingual STT with OpenAI's low-latency
+    voice synthesis — no separate TTS API call needed.
+    """
 
     def __init__(self, config: Dict[str, Any], ha_client, tool_registry, session_id: str):
         super().__init__(config, ha_client, tool_registry, session_id)
@@ -30,20 +36,36 @@ class HybridProvider(BaseProvider):
         if not self.soniox_api_key:
             raise ValueError("soniox_api_key is required for Hybrid provider")
 
-        self.tts_api_key = config.get("tts_api_key") or config.get("gemini_api_key")
-        self.llm_provider_name = config.get("llm_provider", "gemini")
+        self.openai_api_key = config.get("openai_api_key")
+        if not self.openai_api_key:
+            raise ValueError("openai_api_key is required for Hybrid provider")
 
-        # Conversation history for text LLM
-        self.conversation_history: List[Dict[str, str]] = []
+        self.model = config.get("openai_model", DEFAULT_MODEL)
+        self.voice = config.get("openai_voice", "alloy").lower()
+        self._audio_accumulator = b""
 
         # Build system instruction
         croatian = config.get("croatian_personality", True)
         if croatian:
-            self.system_instruction = """Ja sam Jarvis, virtualni asistent u pametnoj kući.
-Govoriš isključivo hrvatski jezik. Muškog si roda.
-Kratki i jasni odgovori. Odgovaram na SVA pitanja.
-Kada korisnik kaže "hvala", "to je sve", "doviđenja" - pozovi end_conversation().
-Potvrdi svaku izvršenu akciju kratko."""
+            self.system_instruction = """Pozdrav! Ja sam Jarvis, tvoj virtualni asistent u pametnoj kući.
+
+VAŽNO:
+- Govoriš isključivo hrvatski jezik
+- Muškog si roda (ja sam Jarvis)
+- Prijateljski i prirodan ton razgovora
+- Kratki i jasni odgovori (ne duljiti)
+- Odgovaram na SVA pitanja - od kontrole kuće do općih znanja, matematike, programiranja, savjeta, itd.
+
+MOGUĆNOSTI:
+- Kontrola pametne kuće (rasvjeta, uređaji)
+- Odgovaranje na bilo koja pitanja (opće znanje, matematika, savjeti, programiranje, itd.)
+- Razgovori o bilo kojoj temi
+
+PRAVILA RAZGOVORA:
+- Kada korisnik kaže "hvala", "to je sve", "doviđenja" ili prestane govoriti dulje vrijeme - pozovi funkciju end_conversation()
+- Potvrdi svaku izvršenu akciju kratko i jasno
+- Uvijek pokušaj pomoći, bez obzira na temu pitanja
+"""
         else:
             self.system_instruction = "You are a helpful home assistant. Control devices and answer questions."
 
@@ -57,8 +79,12 @@ Potvrdi svaku izvršenu akciju kratko."""
         self.soniox_ws = None
         self.soniox_session = None
 
+        # OpenAI Realtime state
+        self.openai_ws = None
+        self.openai_session = None
+
     async def start(self) -> None:
-        """Start the hybrid pipeline."""
+        """Start the hybrid pipeline: Soniox STT + OpenAI Realtime."""
         logger.info(f"Starting Hybrid session {self.session_id}")
         self.active = True
 
@@ -67,10 +93,25 @@ Potvrdi svaku izvršenu akciju kratko."""
         if device_list:
             self.system_instruction += device_list
 
+        # Connect to OpenAI Realtime
+        url = f"{OPENAI_REALTIME_URL}?model={self.model}"
+        headers = {
+            "Authorization": f"Bearer {self.openai_api_key}",
+            "OpenAI-Beta": "realtime=v1",
+        }
+
         try:
+            self.openai_session = aiohttp.ClientSession()
+            self.openai_ws = await self.openai_session.ws_connect(url, headers=headers, heartbeat=30)
+            logger.info(f"Connected to OpenAI Realtime API ({self.model})")
+
+            # Configure session — text input only, audio output
+            await self._send_session_update()
+
             async with asyncio.TaskGroup() as tg:
                 tg.create_task(self._stt_stream_loop())
-                tg.create_task(self._orchestrator_loop())
+                tg.create_task(self._transcript_to_openai_loop())
+                tg.create_task(self._openai_receive_loop())
                 await asyncio.sleep(0)
 
                 while self.active:
@@ -88,7 +129,31 @@ Potvrdi svaku izvršenu akciju kratko."""
                 await self.soniox_ws.close()
             if self.soniox_session:
                 await self.soniox_session.close()
+            if self.openai_ws and not self.openai_ws.closed:
+                await self.openai_ws.close()
+            if self.openai_session:
+                await self.openai_session.close()
             logger.info(f"Hybrid session {self.session_id} terminated")
+
+    async def _send_session_update(self):
+        """Configure OpenAI Realtime for text input + audio output."""
+        session_config = {
+            "type": "session.update",
+            "session": {
+                "modalities": ["text", "audio"],
+                "instructions": self.system_instruction,
+                "voice": self.voice,
+                "output_audio_format": "pcm16",
+                "turn_detection": None,  # We handle turn detection via Soniox
+                "tools": self.tool_registry.to_openai_tools(),
+                "tool_choice": "auto",
+                "temperature": 0.6,
+            }
+        }
+        await self.openai_ws.send_json(session_config)
+        logger.info(f"OpenAI session configured: voice={self.voice}, text input mode")
+
+    # ── Soniox STT ──────────────────────────────────────────────
 
     async def _stt_stream_loop(self):
         """Stream mic audio to Soniox STT, emit transcripts."""
@@ -97,7 +162,6 @@ Potvrdi svaku izvršenu akciju kratko."""
             self.soniox_ws = await self.soniox_session.ws_connect(SONIOX_WS_URL)
             logger.info("Connected to Soniox STT")
 
-            # Send config
             stt_config = {
                 "api_key": self.soniox_api_key,
                 "model": "stt-rt-preview",
@@ -109,7 +173,6 @@ Potvrdi svaku izvršenu akciju kratko."""
             await self.soniox_ws.send_json(stt_config)
             logger.info("Soniox config sent")
 
-            # Start two subtasks: send audio + receive transcripts
             async with asyncio.TaskGroup() as tg:
                 tg.create_task(self._stt_send_audio())
                 tg.create_task(self._stt_receive_transcripts())
@@ -126,7 +189,7 @@ Potvrdi svaku izvršenu akciju kratko."""
     async def _stt_send_audio(self):
         """Send device audio to Soniox."""
         chunks = 0
-        keepalive_interval = 15  # seconds
+        keepalive_interval = 15
         last_keepalive = asyncio.get_event_loop().time()
 
         try:
@@ -136,7 +199,6 @@ Potvrdi svaku izvršenu akciju kratko."""
                         self.audio_out_queue.get(), timeout=1.0
                     )
                 except asyncio.TimeoutError:
-                    # Send keepalive
                     now = asyncio.get_event_loop().time()
                     if now - last_keepalive > keepalive_interval:
                         await self.soniox_ws.send_json({"type": "keepalive"})
@@ -146,7 +208,6 @@ Potvrdi svaku izvršenu akciju kratko."""
                 if audio_data is None:
                     break
 
-                # Convert: stereo 32-bit -> mono 16-bit (16kHz, perfect for Soniox)
                 mono_audio = self.convert_device_audio(audio_data)
                 await self.soniox_ws.send_bytes(mono_audio)
                 chunks += 1
@@ -160,16 +221,10 @@ Potvrdi svaku izvršenu akciju kratko."""
             logger.info(f"STT send ended, {chunks} chunks")
 
     async def _stt_receive_transcripts(self):
-        """Receive transcripts from Soniox.
-
-        Soniox streams tokens with is_final flag. We accumulate final tokens
-        into sentences. A sentence is emitted when we see a pause (no new
-        final tokens for 800ms) or the stream finishes.
-        """
+        """Receive transcripts from Soniox and queue them."""
         final_text = ""
-        nonfinal_text = ""
         last_final_time = 0.0
-        SENTENCE_PAUSE_MS = 800  # emit after 800ms of no new final tokens
+        SENTENCE_PAUSE_MS = 800
 
         try:
             async for msg in self.soniox_ws:
@@ -179,7 +234,6 @@ Potvrdi svaku izvršenu akciju kratko."""
                 if msg.type == aiohttp.WSMsgType.TEXT:
                     data = json.loads(msg.data)
 
-                    # Check for errors
                     if data.get("error_message"):
                         logger.error(f"Soniox error: {data['error_message']}")
                         continue
@@ -191,12 +245,8 @@ Potvrdi svaku izvršenu akciju kratko."""
 
                         if is_final:
                             final_text += text
-                            nonfinal_text = ""
                             last_final_time = asyncio.get_event_loop().time()
-                        else:
-                            nonfinal_text += text
 
-                    # Check if enough pause after last final token to emit sentence
                     if final_text and last_final_time > 0:
                         elapsed = (asyncio.get_event_loop().time() - last_final_time) * 1000
                         if elapsed >= SENTENCE_PAUSE_MS:
@@ -205,16 +255,13 @@ Potvrdi svaku izvršenu akciju kratko."""
                                 logger.info(f"STT transcript: '{clean}'")
                                 await self.transcript_queue.put(clean)
                             final_text = ""
-                            nonfinal_text = ""
 
-                    # Stream finished
                     if data.get("finished"):
                         clean = final_text.strip()
                         if clean:
                             logger.info(f"STT final: '{clean}'")
                             await self.transcript_queue.put(clean)
                         final_text = ""
-                        nonfinal_text = ""
 
                 elif msg.type in (aiohttp.WSMsgType.CLOSED, aiohttp.WSMsgType.ERROR):
                     logger.info("Soniox WebSocket closed")
@@ -223,10 +270,12 @@ Potvrdi svaku izvršenu akciju kratko."""
         except Exception as e:
             logger.error(f"Error receiving from Soniox: {e}", exc_info=True)
 
-    async def _orchestrator_loop(self):
-        """Process transcripts: LLM query -> tool calls -> TTS -> audio output."""
+    # ── OpenAI Realtime (text in, audio out) ────────────────────
+
+    async def _transcript_to_openai_loop(self):
+        """Take Soniox transcripts and send as text to OpenAI Realtime."""
         try:
-            logger.info("Orchestrator loop started")
+            logger.info("Transcript->OpenAI loop started")
             while self.active:
                 try:
                     transcript = await asyncio.wait_for(
@@ -235,216 +284,136 @@ Potvrdi svaku izvršenu akciju kratko."""
                 except asyncio.TimeoutError:
                     continue
 
-                logger.info(f"Processing transcript: '{transcript}'")
+                logger.info(f"Sending text to OpenAI Realtime: '{transcript}'")
 
-                # Add user message to history
-                self.conversation_history.append({"role": "user", "content": transcript})
+                # Create a user message with text content
+                await self.openai_ws.send_json({
+                    "type": "conversation.item.create",
+                    "item": {
+                        "type": "message",
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "input_text",
+                                "text": transcript,
+                            }
+                        ]
+                    }
+                })
 
-                # Query LLM with function calling
-                response_text, tool_calls = await self._query_llm()
-
-                # Handle tool calls
-                if tool_calls:
-                    for tc in tool_calls:
-                        result = await self.execute_tool(tc["name"], tc["args"])
-                        self.conversation_history.append({
-                            "role": "assistant",
-                            "content": f"[Called {tc['name']}: {json.dumps(result)}]"
-                        })
-                        if not self.active:
-                            return
-
-                    # Get follow-up response after tool calls
-                    response_text, _ = await self._query_llm()
-
-                if response_text:
-                    logger.info(f"LLM response: '{response_text}'")
-                    self.conversation_history.append({"role": "assistant", "content": response_text})
-
-                    # Convert to speech
-                    audio_data = await self._text_to_speech(response_text)
-                    if audio_data:
-                        self.playing = True
-                        # Split into 19200B chunks (400ms at 24kHz 16-bit)
-                        CHUNK = 19200
-                        for i in range(0, len(audio_data), CHUNK):
-                            chunk = audio_data[i:i + CHUNK]
-                            # Pad last chunk to full size
-                            if len(chunk) < CHUNK:
-                                chunk = chunk + b'\x00' * (CHUNK - len(chunk))
-                            try:
-                                self.audio_in_queue.put_nowait(chunk)
-                            except asyncio.QueueFull:
-                                try:
-                                    self.audio_in_queue.get_nowait()
-                                except asyncio.QueueEmpty:
-                                    pass
-                                self.audio_in_queue.put_nowait(chunk)
+                # Trigger response generation
+                await self.openai_ws.send_json({
+                    "type": "response.create",
+                })
 
         except Exception as e:
-            logger.error(f"Orchestrator error: {e}", exc_info=True)
+            logger.error(f"Transcript->OpenAI error: {e}", exc_info=True)
         finally:
-            logger.info("Orchestrator loop ended")
+            logger.info("Transcript->OpenAI loop ended")
 
-    async def _query_llm(self) -> tuple[str, list]:
-        """Query text LLM with conversation history and tools.
+    async def _openai_receive_loop(self):
+        """Receive audio and events from OpenAI Realtime WebSocket.
 
-        Returns (response_text, tool_calls) where tool_calls is a list of
-        {"name": str, "args": dict}.
+        Same logic as openai_realtime.py _receive_loop.
         """
-        if self.llm_provider_name == "openai":
-            return await self._query_openai_text()
-        else:
-            return await self._query_gemini_text()
-
-    async def _query_gemini_text(self) -> tuple[str, list]:
-        """Query Gemini text API with function calling."""
-        from google import genai
-        from google.genai import types
-
-        api_key = self.config.get("gemini_api_key")
-        if not api_key:
-            return "API key not configured", []
-
-        client = genai.Client(api_key=api_key)
-
-        # Build contents from history
-        contents = []
-        for msg in self.conversation_history:
-            role = "user" if msg["role"] == "user" else "model"
-            contents.append(types.Content(
-                parts=[types.Part.from_text(text=msg["content"])],
-                role=role
-            ))
-
+        audio_chunks = 0
         try:
-            response = await client.aio.models.generate_content(
-                model="gemini-2.0-flash",
-                contents=contents,
-                config=types.GenerateContentConfig(
-                    system_instruction=self.system_instruction,
-                    tools=self.tool_registry.to_gemini_tools(),
-                    temperature=0.6,
-                )
-            )
+            logger.info("OpenAI receive loop started")
+            async for msg in self.openai_ws:
+                if not self.active:
+                    break
 
-            # Check for function calls
-            tool_calls = []
-            if response.candidates and response.candidates[0].content:
-                for part in response.candidates[0].content.parts:
-                    if hasattr(part, 'function_call') and part.function_call:
-                        fc = part.function_call
-                        tool_calls.append({
-                            "name": fc.name,
-                            "args": dict(fc.args) if fc.args else {}
-                        })
+                if msg.type == aiohttp.WSMsgType.TEXT:
+                    event = json.loads(msg.data)
+                    event_type = event.get("type", "")
 
-            # Get text response
-            text = response.text if hasattr(response, 'text') and response.text else ""
-            return text, tool_calls
+                    if event_type == "response.audio.delta":
+                        self.playing = True
+                        audio_b64 = event.get("delta", "")
+                        if audio_b64:
+                            self._audio_accumulator += base64.b64decode(audio_b64)
+                            audio_chunks += 1
+                            CHUNK = 19200
+                            while len(self._audio_accumulator) >= CHUNK:
+                                chunk = self._audio_accumulator[:CHUNK]
+                                self._audio_accumulator = self._audio_accumulator[CHUNK:]
+                                try:
+                                    self.audio_in_queue.put_nowait(chunk)
+                                except asyncio.QueueFull:
+                                    try:
+                                        self.audio_in_queue.get_nowait()
+                                    except asyncio.QueueEmpty:
+                                        pass
+                                    self.audio_in_queue.put_nowait(chunk)
+
+                    elif event_type == "response.audio.done":
+                        if self._audio_accumulator:
+                            CHUNK = 19200
+                            padded = self._audio_accumulator + b'\x00' * (CHUNK - len(self._audio_accumulator))
+                            try:
+                                self.audio_in_queue.put_nowait(padded)
+                            except asyncio.QueueFull:
+                                pass
+                            self._audio_accumulator = b""
+                        logger.info(f"Audio response complete, {audio_chunks} deltas")
+                        audio_chunks = 0
+
+                    elif event_type == "response.audio_transcript.done":
+                        transcript = event.get("transcript", "")
+                        logger.info(f"Agent said: {transcript}")
+
+                    elif event_type == "response.function_call_arguments.done":
+                        await self._handle_function_call(event)
+
+                    elif event_type == "error":
+                        error = event.get("error", {})
+                        logger.error(f"OpenAI error: {error}")
+
+                    elif event_type == "session.created":
+                        logger.info("OpenAI Realtime session created")
+
+                    elif event_type == "session.updated":
+                        logger.info("OpenAI Realtime session updated")
+
+                    elif event_type == "response.done":
+                        logger.debug(f"Response done, queue: {self.audio_in_queue.qsize()}")
+
+                elif msg.type in (aiohttp.WSMsgType.CLOSED, aiohttp.WSMsgType.ERROR):
+                    logger.info(f"OpenAI WebSocket closed/error: {msg.type}")
+                    self.active = False
+                    break
 
         except Exception as e:
-            logger.error(f"Gemini text query error: {e}", exc_info=True)
-            return f"Error: {e}", []
+            logger.error(f"Error in OpenAI receive loop: {e}", exc_info=True)
+        finally:
+            logger.info("OpenAI receive loop ended")
 
-    async def _query_openai_text(self) -> tuple[str, list]:
-        """Query OpenAI text API with function calling."""
-        api_key = self.config.get("openai_api_key")
-        if not api_key:
-            return "API key not configured", []
-
-        messages = [{"role": "system", "content": self.system_instruction}]
-        messages.extend(self.conversation_history)
-
-        # Convert tools to OpenAI chat format
-        tools = []
-        for t in self.tool_registry.all_tools():
-            tools.append({
-                "type": "function",
-                "function": {
-                    "name": t.name,
-                    "description": t.description,
-                    "parameters": t.parameters_schema,
-                }
-            })
+    async def _handle_function_call(self, event: dict):
+        """Handle a function call from OpenAI."""
+        call_id = event.get("call_id", "")
+        name = event.get("name", "")
+        arguments_str = event.get("arguments", "{}")
 
         try:
-            async with aiohttp.ClientSession() as session:
-                async with session.post(
-                    "https://api.openai.com/v1/chat/completions",
-                    headers={
-                        "Authorization": f"Bearer {api_key}",
-                        "Content-Type": "application/json",
-                    },
-                    json={
-                        "model": "gpt-4o",
-                        "messages": messages,
-                        "tools": tools,
-                        "tool_choice": "auto",
-                        "temperature": 0.6,
-                    },
-                    timeout=aiohttp.ClientTimeout(total=15),
-                ) as resp:
-                    data = await resp.json()
+            args = json.loads(arguments_str)
+        except json.JSONDecodeError:
+            args = {}
 
-            choice = data.get("choices", [{}])[0]
-            message = choice.get("message", {})
+        logger.info(f"Function call: {name}({args}), call_id={call_id}")
 
-            # Check for tool calls
-            tool_calls = []
-            if message.get("tool_calls"):
-                for tc in message["tool_calls"]:
-                    func = tc.get("function", {})
-                    try:
-                        args = json.loads(func.get("arguments", "{}"))
-                    except json.JSONDecodeError:
-                        args = {}
-                    tool_calls.append({"name": func.get("name", ""), "args": args})
+        result = await self.execute_tool(name, args)
 
-            text = message.get("content", "") or ""
-            return text, tool_calls
+        await self.openai_ws.send_json({
+            "type": "conversation.item.create",
+            "item": {
+                "type": "function_call_output",
+                "call_id": call_id,
+                "output": json.dumps(result),
+            }
+        })
 
-        except Exception as e:
-            logger.error(f"OpenAI text query error: {e}", exc_info=True)
-            return f"Error: {e}", []
+        await self.openai_ws.send_json({
+            "type": "response.create",
+        })
 
-    async def _text_to_speech(self, text: str) -> Optional[bytes]:
-        """Convert text to speech using OpenAI TTS API.
-
-        Returns 24kHz 16-bit mono PCM audio bytes.
-        """
-        api_key = self.config.get("openai_api_key")
-        if not api_key:
-            logger.error("No OpenAI API key for TTS")
-            return None
-
-        voice = self.config.get("openai_voice", "alloy").lower()
-
-        try:
-            async with aiohttp.ClientSession() as session:
-                async with session.post(
-                    "https://api.openai.com/v1/audio/speech",
-                    headers={
-                        "Authorization": f"Bearer {api_key}",
-                        "Content-Type": "application/json",
-                    },
-                    json={
-                        "model": "tts-1",
-                        "input": text,
-                        "voice": voice,
-                        "response_format": "pcm",
-                    },
-                    timeout=aiohttp.ClientTimeout(total=15),
-                ) as resp:
-                    if resp.status != 200:
-                        error = await resp.text()
-                        logger.error(f"TTS error: {resp.status} - {error}")
-                        return None
-
-                    raw_audio = await resp.read()
-                    logger.info(f"TTS generated {len(raw_audio)} bytes of audio")
-                    return raw_audio
-
-        except Exception as e:
-            logger.error(f"TTS error: {e}", exc_info=True)
-            return None
+        logger.info(f"Tool response sent for {name}, call_id={call_id}")
