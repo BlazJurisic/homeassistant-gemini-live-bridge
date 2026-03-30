@@ -152,7 +152,7 @@ class DeviceConnection:
                 bytes_sent += len(data)
 
                 chunk_duration = len(data) / BYTES_PER_SEC
-                await asyncio.sleep(chunk_duration * 0.9)
+                await asyncio.sleep(chunk_duration * 0.8)
 
                 if chunks_sent % 20 == 1:
                     qsize = self.provider.audio_in_queue.qsize()
