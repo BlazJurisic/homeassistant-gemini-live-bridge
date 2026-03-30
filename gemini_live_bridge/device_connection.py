@@ -142,18 +142,16 @@ class DeviceConnection:
                         self.provider.playing = False
                     continue
 
-                # Send chunk directly
+                # Send chunk as fast as TCP allows. No per-chunk sleep.
+                # The ESP32 has a 2-second speaker buffer + PLAYING state machine
+                # that handles backpressure when mixer is full.
+                # For Gemini (real-time stream), chunks arrive at natural pace.
+                # For OpenAI (burst), all chunks are queued then drained here.
                 header = struct.pack('>I', len(data))
                 self.writer.write(header + data)
                 await self.writer.drain()
                 chunks_sent += 1
                 bytes_sent += len(data)
-
-                # Pace at real-time. 0.9x was tuned for Gemini's real-time stream
-                # but causes choppiness with OpenAI's burst pattern. 1.0x is safe
-                # because the ESP32 has a 2-second speaker buffer for absorption.
-                chunk_duration = len(data) / BYTES_PER_SEC
-                await asyncio.sleep(chunk_duration)
 
                 if chunks_sent % 20 == 1:
                     qsize = self.provider.audio_in_queue.qsize()
