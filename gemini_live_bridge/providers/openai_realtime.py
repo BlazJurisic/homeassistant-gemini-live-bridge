@@ -74,6 +74,11 @@ PRAVILA RAZGOVORA:
         logger.info(f"Starting OpenAI Realtime session {self.session_id}")
         self.active = True
 
+        # Append available devices to system instruction
+        device_list = await self.fetch_device_list()
+        if device_list:
+            self.system_instruction += device_list
+
         url = f"{OPENAI_REALTIME_URL}?model={self.model}"
         headers = {
             "Authorization": f"Bearer {self.api_key}",

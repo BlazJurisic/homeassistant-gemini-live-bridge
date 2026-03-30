@@ -66,15 +66,26 @@ Ti: [pozovi end_conversation()] "Doviđenja!"
         else:
             system_instruction = "You are a helpful home assistant. Control devices and answer questions."
 
-        voice_name = config.get("gemini_voice", "Zephyr")
+        self.voice_name = config.get("gemini_voice", "Zephyr")
+        self.system_instruction = system_instruction
 
-        self.live_config = types.LiveConnectConfig(
+    async def start(self) -> None:
+        """Start the Gemini Live session."""
+        logger.info(f"Starting Gemini session {self.session_id}")
+        self.active = True
+
+        # Append available devices to system instruction
+        device_list = await self.fetch_device_list()
+        if device_list:
+            self.system_instruction += device_list
+
+        live_config = types.LiveConnectConfig(
             response_modalities=["AUDIO"],
             media_resolution="MEDIA_RESOLUTION_MEDIUM",
             speech_config=types.SpeechConfig(
                 voice_config=types.VoiceConfig(
                     prebuilt_voice_config=types.PrebuiltVoiceConfig(
-                        voice_name=voice_name
+                        voice_name=self.voice_name
                     )
                 )
             ),
@@ -83,20 +94,15 @@ Ti: [pozovi end_conversation()] "Doviđenja!"
                 sliding_window=types.SlidingWindow(target_tokens=12800),
             ),
             system_instruction=types.Content(
-                parts=[types.Part.from_text(text=system_instruction)],
+                parts=[types.Part.from_text(text=self.system_instruction)],
                 role="user"
             ),
             tools=self.tool_registry.to_gemini_tools(),
         )
 
-    async def start(self) -> None:
-        """Start the Gemini Live session."""
-        logger.info(f"Starting Gemini session {self.session_id}")
-        self.active = True
-
         try:
             async with (
-                self.client.aio.live.connect(model=MODEL, config=self.live_config) as session,
+                self.client.aio.live.connect(model=MODEL, config=live_config) as session,
                 asyncio.TaskGroup() as tg,
             ):
                 logger.info("Connected to Gemini Live API")

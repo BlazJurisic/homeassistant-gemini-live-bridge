@@ -46,6 +46,21 @@ class HomeAssistantClient:
             logger.error(f"Service call exception: {e}")
             return {"success": False, "error": str(e)}
 
+    async def get_states(self) -> list:
+        """Get all entity states."""
+        url = f"{self.url}/api/states"
+
+        try:
+            async with self.session.get(url, timeout=aiohttp.ClientTimeout(total=10)) as response:
+                if response.status == 200:
+                    return await response.json()
+                else:
+                    logger.error(f"Failed to get states: {response.status}")
+                    return []
+        except Exception as e:
+            logger.error(f"Get states exception: {e}")
+            return []
+
     async def get_state(self, entity_id: str) -> Dict[str, Any]:
         """Get the state of an entity."""
         url = f"{self.url}/api/states/{entity_id}"

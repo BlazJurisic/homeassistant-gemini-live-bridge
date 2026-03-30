@@ -3,11 +3,13 @@
 import asyncio
 import logging
 from abc import ABC, abstractmethod
-from typing import Dict, Any
+from typing import Dict, Any, List
 
 from audio import convert_32bit_stereo_to_16bit_mono
 
 logger = logging.getLogger(__name__)
+
+CONTROLLABLE_DOMAINS = {"light", "switch", "cover", "climate", "fan", "media_player", "input_boolean", "scene", "script"}
 
 
 class BaseProvider(ABC):
@@ -33,6 +35,31 @@ class BaseProvider(ABC):
 
         self.active: bool = False
         self.playing: bool = False  # True while audio is being sent to speaker
+
+    async def fetch_device_list(self) -> str:
+        """Fetch available HA devices and format as text for system prompt."""
+        try:
+            states = await self.ha_client.get_states()
+            if not states:
+                return ""
+
+            lines = []
+            for s in sorted(states, key=lambda x: x.get("entity_id", "")):
+                eid = s.get("entity_id", "")
+                domain = eid.split(".")[0]
+                if domain not in CONTROLLABLE_DOMAINS:
+                    continue
+                name = s.get("attributes", {}).get("friendly_name", eid)
+                state = s.get("state", "unknown")
+                lines.append(f"- {name}: entity_id={eid}, state={state}")
+
+            if lines:
+                logger.info(f"Fetched {len(lines)} controllable devices from HA")
+                return "\n\nDOSTUPNI UREĐAJI U KUĆI:\n" + "\n".join(lines) + "\n\nKoristi točan entity_id iz gornje liste kada kontroliraš uređaje."
+            return ""
+        except Exception as e:
+            logger.error(f"Failed to fetch device list: {e}")
+            return ""
 
     @abstractmethod
     async def start(self) -> None:

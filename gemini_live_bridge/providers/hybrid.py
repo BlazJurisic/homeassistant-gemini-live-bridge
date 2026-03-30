@@ -57,6 +57,11 @@ Potvrdi svaku izvršenu akciju kratko."""
         logger.info(f"Starting Hybrid session {self.session_id}")
         self.active = True
 
+        # Append available devices to system instruction
+        device_list = await self.fetch_device_list()
+        if device_list:
+            self.system_instruction += device_list
+
         try:
             async with asyncio.TaskGroup() as tg:
                 tg.create_task(self._stt_stream_loop())
