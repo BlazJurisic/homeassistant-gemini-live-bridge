@@ -91,12 +91,10 @@ Potvrdi svaku izvršenu akciju kratko."""
             stt_config = {
                 "api_key": self.soniox_api_key,
                 "model": "stt-rt-preview",
+                "audio_format": "s16le",
+                "sample_rate": 16000,
+                "num_channels": 1,
                 "language_hints": ["hr", "en"],
-                "enable_endpoint_detection": True,
-                "include_nonfinal": True,
-                "sample_rate_hertz": 16000,
-                "encoding": "pcm_s16le",
-                "num_audio_channels": 1,
             }
             await self.soniox_ws.send_json(stt_config)
             logger.info("Soniox config sent")
@@ -152,8 +150,17 @@ Potvrdi svaku izvršenu akciju kratko."""
             logger.info(f"STT send ended, {chunks} chunks")
 
     async def _stt_receive_transcripts(self):
-        """Receive transcripts from Soniox."""
-        current_text = ""
+        """Receive transcripts from Soniox.
+
+        Soniox streams tokens with is_final flag. We accumulate final tokens
+        into sentences. A sentence is emitted when we see a pause (no new
+        final tokens for 800ms) or the stream finishes.
+        """
+        final_text = ""
+        nonfinal_text = ""
+        last_final_time = 0.0
+        SENTENCE_PAUSE_MS = 800  # emit after 800ms of no new final tokens
+
         try:
             async for msg in self.soniox_ws:
                 if not self.active:
@@ -162,28 +169,42 @@ Potvrdi svaku izvršenu akciju kratko."""
                 if msg.type == aiohttp.WSMsgType.TEXT:
                     data = json.loads(msg.data)
 
-                    # Soniox sends tokens with isFinal flag
+                    # Check for errors
+                    if data.get("error_message"):
+                        logger.error(f"Soniox error: {data['error_message']}")
+                        continue
+
                     tokens = data.get("tokens", [])
                     for token in tokens:
-                        word = token.get("text", "")
+                        text = token.get("text", "")
                         is_final = token.get("is_final", False)
-                        current_text += word
 
-                        # Check for endpoint detection (<end> token)
-                        if word == "<end>" or is_final:
-                            clean_text = current_text.replace("<end>", "").strip()
-                            if clean_text:
-                                logger.info(f"STT transcript: '{clean_text}'")
-                                await self.transcript_queue.put(clean_text)
-                            current_text = ""
+                        if is_final:
+                            final_text += text
+                            nonfinal_text = ""
+                            last_final_time = asyncio.get_event_loop().time()
+                        else:
+                            nonfinal_text += text
 
-                    # Also check top-level finished flag
+                    # Check if enough pause after last final token to emit sentence
+                    if final_text and last_final_time > 0:
+                        elapsed = (asyncio.get_event_loop().time() - last_final_time) * 1000
+                        if elapsed >= SENTENCE_PAUSE_MS:
+                            clean = final_text.strip()
+                            if clean:
+                                logger.info(f"STT transcript: '{clean}'")
+                                await self.transcript_queue.put(clean)
+                            final_text = ""
+                            nonfinal_text = ""
+
+                    # Stream finished
                     if data.get("finished"):
-                        clean_text = current_text.strip()
-                        if clean_text:
-                            logger.info(f"STT final: '{clean_text}'")
-                            await self.transcript_queue.put(clean_text)
-                        current_text = ""
+                        clean = final_text.strip()
+                        if clean:
+                            logger.info(f"STT final: '{clean}'")
+                            await self.transcript_queue.put(clean)
+                        final_text = ""
+                        nonfinal_text = ""
 
                 elif msg.type in (aiohttp.WSMsgType.CLOSED, aiohttp.WSMsgType.ERROR):
                     logger.info("Soniox WebSocket closed")
