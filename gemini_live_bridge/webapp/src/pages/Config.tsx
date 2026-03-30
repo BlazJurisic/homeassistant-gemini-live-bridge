@@ -82,8 +82,8 @@ export default function Config() {
           </>
         )}
 
-        {/* OpenAI settings */}
-        {config.provider === 'openai' && (
+        {/* OpenAI settings (used by both openai and hybrid providers) */}
+        {(config.provider === 'openai' || config.provider === 'hybrid') && (
           <>
             <Field label="OpenAI API Key">
               <input
@@ -106,6 +106,19 @@ export default function Config() {
               </select>
             </Field>
           </>
+        )}
+
+        {/* Soniox STT key (hybrid only) */}
+        {config.provider === 'hybrid' && (
+          <Field label="Soniox API Key">
+            <input
+              type="password"
+              value={(config as Record<string, unknown>).soniox_api_key as string || ''}
+              onChange={(e) => update('soniox_api_key', e.target.value)}
+              placeholder="Soniox STT key..."
+              className="input"
+            />
+          </Field>
         )}
 
         {/* Common settings */}
