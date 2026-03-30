@@ -113,20 +113,11 @@ class DeviceConnection:
             logger.info(f"receive_from_device ended, {chunks} chunks")
 
     async def send_to_device(self):
-        """Send audio from provider to device with drift-free pacing.
-
-        Uses a monotonic clock to track cumulative bytes sent vs elapsed time.
-        Paces at exactly 0.9x real-time without per-chunk sleep jitter.
-        The clock resets when queue empties (end of response).
-        """
+        """Send audio to device with simple per-chunk pacing."""
         logger.info("send_to_device started")
         chunks_sent = 0
         bytes_sent = 0
-        BYTES_PER_SEC = 48000.0  # 24kHz * 16-bit = 48000 bytes/sec
-        PACE = 0.9  # send 10% ahead of real-time
-
-        clock_start = None
-        clock_bytes = 0
+        BYTES_PER_SEC = 48000.0
 
         try:
             while self.active:
@@ -141,37 +132,6 @@ class DeviceConnection:
                 except asyncio.TimeoutError:
                     if self.provider:
                         self.provider.playing = False
-                    clock_start = None
-                    continue
-
-                loop = asyncio.get_event_loop()
-
-                # On first chunk: wait for buffer to fill before starting playback.
-                # Send 3 chunks instantly (burst-fill ~1.2s of audio), then pace.
-                # This prevents the ESP32 buffer from running dry at the start.
-                if clock_start is None:
-                    # Collect up to 3 chunks (wait max 500ms for more)
-                    burst = [data]
-                    for _ in range(2):
-                        try:
-                            more = await asyncio.wait_for(
-                                self.provider.audio_in_queue.get(), timeout=0.5
-                            )
-                            burst.append(more)
-                        except asyncio.TimeoutError:
-                            break
-                    # Send all burst chunks immediately
-                    for chunk in burst:
-                        h = struct.pack('>I', len(chunk))
-                        self.writer.write(h + chunk)
-                        chunks_sent += 1
-                        bytes_sent += len(chunk)
-                    await self.writer.drain()
-                    clock_bytes = sum(len(c) for c in burst)
-                    clock_start = loop.time()
-                    if chunks_sent % 20 == 1:
-                        qsize = self.provider.audio_in_queue.qsize()
-                        logger.info(f"Chunk #{chunks_sent}: burst {len(burst)} chunks, queue: {qsize}, total: {bytes_sent}B")
                     continue
 
                 header = struct.pack('>I', len(data))
@@ -179,18 +139,9 @@ class DeviceConnection:
                 await self.writer.drain()
                 chunks_sent += 1
                 bytes_sent += len(data)
-                clock_bytes += len(data)
 
-                # Drift-free: calculate exact target time for this many bytes
-                target = clock_start + (clock_bytes / BYTES_PER_SEC) * PACE
-                now = loop.time()
-                delay = target - now
-                if delay > 0.001:  # only sleep if > 1ms
-                    await asyncio.sleep(delay)
-
-                # Reset clock when queue drains (response ended)
-                if self.provider.audio_in_queue.empty():
-                    clock_start = None
+                chunk_duration = len(data) / BYTES_PER_SEC
+                await asyncio.sleep(chunk_duration * 0.8)
 
                 if chunks_sent % 20 == 1:
                     qsize = self.provider.audio_in_queue.qsize()
