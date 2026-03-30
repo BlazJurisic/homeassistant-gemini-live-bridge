@@ -187,20 +187,26 @@ PRAVILA RAZGOVORA:
                     event_type = event.get("type", "")
 
                     if event_type == "response.audio.delta":
-                        # Forward raw decoded audio directly, like Gemini does.
-                        # No accumulator, no chunking - just put_nowait.
+                        # OpenAI sends large variable chunks (4800-26400B).
+                        # Split into ~1920B pieces to match Gemini's size.
+                        # This prevents overwhelming ESP32's small mixer buffer.
                         self.playing = True
                         audio_b64 = event.get("delta", "")
                         if audio_b64:
-                            audio_data = base64.b64decode(audio_b64)
-                            try:
-                                self.audio_in_queue.put_nowait(audio_data)
-                            except asyncio.QueueFull:
+                            raw = base64.b64decode(audio_b64)
+                            # Split into 1920B chunks (same as Gemini natural size)
+                            offset = 0
+                            while offset < len(raw):
+                                chunk = raw[offset:offset + 1920]
+                                offset += 1920
                                 try:
-                                    self.audio_in_queue.get_nowait()
-                                except asyncio.QueueEmpty:
-                                    pass
-                                self.audio_in_queue.put_nowait(audio_data)
+                                    self.audio_in_queue.put_nowait(chunk)
+                                except asyncio.QueueFull:
+                                    try:
+                                        self.audio_in_queue.get_nowait()
+                                    except asyncio.QueueEmpty:
+                                        pass
+                                    self.audio_in_queue.put_nowait(chunk)
                             audio_chunks += 1
 
                     elif event_type == "response.audio.done":
