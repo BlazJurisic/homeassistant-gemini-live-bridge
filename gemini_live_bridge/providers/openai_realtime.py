@@ -187,38 +187,25 @@ PRAVILA RAZGOVORA:
                     event_type = event.get("type", "")
 
                     if event_type == "response.audio.delta":
-                        # Stream audio as it arrives.
-                        # Set playing=True immediately so ESP32 mutes mic.
+                        # Forward raw decoded audio directly, like Gemini does.
+                        # No accumulator, no chunking - just put_nowait.
                         self.playing = True
                         audio_b64 = event.get("delta", "")
                         if audio_b64:
-                            self._audio_accumulator += base64.b64decode(audio_b64)
-                            audio_chunks += 1
-                            # Flush at ~2KB (similar to Gemini's natural ~1920B)
-                            while len(self._audio_accumulator) >= 1920:
-                                chunk = self._audio_accumulator[:1920]
-                                self._audio_accumulator = self._audio_accumulator[1920:]
+                            audio_data = base64.b64decode(audio_b64)
+                            try:
+                                self.audio_in_queue.put_nowait(audio_data)
+                            except asyncio.QueueFull:
                                 try:
-                                    self.audio_in_queue.put_nowait(chunk)
-                                except asyncio.QueueFull:
-                                    try:
-                                        self.audio_in_queue.get_nowait()
-                                    except asyncio.QueueEmpty:
-                                        pass
-                                    self.audio_in_queue.put_nowait(chunk)
+                                    self.audio_in_queue.get_nowait()
+                                except asyncio.QueueEmpty:
+                                    pass
+                                self.audio_in_queue.put_nowait(audio_data)
+                            audio_chunks += 1
 
                     elif event_type == "response.audio.done":
-                        # Flush remaining audio
-                        if self._audio_accumulator:
-                            try:
-                                self.audio_in_queue.put_nowait(self._audio_accumulator)
-                            except asyncio.QueueFull:
-                                pass
-                            self._audio_accumulator = b""
                         logger.info(f"Audio response complete, {audio_chunks} deltas")
                         audio_chunks = 0
-                        # Don't clear playing here - let send_to_device drain
-                        # the queue first. playing will be cleared after drain.
 
                     elif event_type == "response.audio_transcript.delta":
                         pass  # Partial transcript, ignore

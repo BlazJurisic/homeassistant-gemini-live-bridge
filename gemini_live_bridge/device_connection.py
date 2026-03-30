@@ -149,14 +149,9 @@ class DeviceConnection:
                 chunks_sent += 1
                 bytes_sent += len(data)
 
-                # Pacing: if queue has backlog (burst provider like OpenAI),
-                # pace at exactly real-time to avoid overwhelming ESP32 mixer.
-                # If queue is low (streaming provider like Gemini), pace at
-                # 0.9x to stay slightly ahead and keep buffer topped up.
-                qsize = self.provider.audio_in_queue.qsize()
-                pace = 1.0 if qsize > 5 else 0.9
+                # Pace at 90% of real-time (proven with Gemini)
                 chunk_duration = len(data) / BYTES_PER_SEC
-                await asyncio.sleep(chunk_duration * pace)
+                await asyncio.sleep(chunk_duration * 0.9)
 
                 if chunks_sent % 20 == 1:
                     qsize = self.provider.audio_in_queue.qsize()
