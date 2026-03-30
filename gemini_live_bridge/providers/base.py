@@ -28,7 +28,7 @@ class BaseProvider(ABC):
         self.session_id = session_id
 
         # Audio queues - DeviceConnection reads/writes these
-        self.audio_in_queue: asyncio.Queue = asyncio.Queue(maxsize=100)  # provider -> device
+        self.audio_in_queue: asyncio.Queue = asyncio.Queue(maxsize=500)  # provider -> device
         self.audio_out_queue: asyncio.Queue = asyncio.Queue(maxsize=100) # device -> provider
 
         self.active: bool = False
