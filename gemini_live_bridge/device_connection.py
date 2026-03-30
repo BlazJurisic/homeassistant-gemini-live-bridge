@@ -146,10 +146,33 @@ class DeviceConnection:
 
                 loop = asyncio.get_event_loop()
 
-                # Start clock on first chunk of response
+                # On first chunk: wait for buffer to fill before starting playback.
+                # Send 3 chunks instantly (burst-fill ~1.2s of audio), then pace.
+                # This prevents the ESP32 buffer from running dry at the start.
                 if clock_start is None:
+                    # Collect up to 3 chunks (wait max 500ms for more)
+                    burst = [data]
+                    for _ in range(2):
+                        try:
+                            more = await asyncio.wait_for(
+                                self.provider.audio_in_queue.get(), timeout=0.5
+                            )
+                            burst.append(more)
+                        except asyncio.TimeoutError:
+                            break
+                    # Send all burst chunks immediately
+                    for chunk in burst:
+                        h = struct.pack('>I', len(chunk))
+                        self.writer.write(h + chunk)
+                        chunks_sent += 1
+                        bytes_sent += len(chunk)
+                    await self.writer.drain()
+                    clock_bytes = sum(len(c) for c in burst)
                     clock_start = loop.time()
-                    clock_bytes = 0
+                    if chunks_sent % 20 == 1:
+                        qsize = self.provider.audio_in_queue.qsize()
+                        logger.info(f"Chunk #{chunks_sent}: burst {len(burst)} chunks, queue: {qsize}, total: {bytes_sent}B")
+                    continue
 
                 header = struct.pack('>I', len(data))
                 self.writer.write(header + data)
