@@ -142,15 +142,17 @@ class DeviceConnection:
                         self.provider.playing = False
                     continue
 
-                # Send chunk then yield to event loop briefly.
-                # No real-time pacing (that caused micro-gaps from sleep imprecision).
-                # Just yield so other tasks can run (mic handling, etc).
+                # Send chunk and pace at 90% of real-time.
+                # 9600B chunk = 200ms audio, sleep 180ms.
+                # This keeps the ESP32 speaker buffer slightly ahead.
                 header = struct.pack('>I', len(data))
                 self.writer.write(header + data)
                 await self.writer.drain()
                 chunks_sent += 1
                 bytes_sent += len(data)
-                await asyncio.sleep(0)  # yield to event loop
+
+                chunk_duration = len(data) / BYTES_PER_SEC
+                await asyncio.sleep(chunk_duration * 0.9)
 
                 if chunks_sent % 20 == 1:
                     qsize = self.provider.audio_in_queue.qsize()
