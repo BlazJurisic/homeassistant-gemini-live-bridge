@@ -1,3 +1,5 @@
+ARG BUILD_FROM=ghcr.io/home-assistant/aarch64-base:latest
+
 # Stage 1: Build React webapp
 FROM node:20-alpine AS webapp
 WORKDIR /app
@@ -7,7 +9,6 @@ COPY webapp/ ./
 RUN npm run build
 
 # Stage 2: Python runtime
-ARG BUILD_FROM=ghcr.io/home-assistant/aarch64-base:latest
 FROM $BUILD_FROM
 
 # Install Python and dependencies
