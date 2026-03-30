@@ -1,13 +1,17 @@
 """Base class for voice providers."""
 
 import asyncio
+import json
 import logging
+import os
 from abc import ABC, abstractmethod
-from typing import Dict, Any, List
+from typing import Dict, Any, List, Optional
 
 from audio import convert_32bit_stereo_to_16bit_mono
 
 logger = logging.getLogger(__name__)
+
+DASHBOARD_CONFIG_PATH = "/data/dashboard.json"
 
 CONTROLLABLE_DOMAINS = {"light", "switch", "cover", "climate", "fan", "media_player", "input_boolean", "scene", "script"}
 
@@ -60,6 +64,19 @@ class BaseProvider(ABC):
         except Exception as e:
             logger.error(f"Failed to fetch device list: {e}")
             return ""
+
+    def get_custom_prompt(self) -> Optional[str]:
+        """Load custom system prompt from dashboard config, if set."""
+        try:
+            if os.path.exists(DASHBOARD_CONFIG_PATH):
+                with open(DASHBOARD_CONFIG_PATH) as f:
+                    data = json.load(f)
+                prompt = data.get("system_prompt", "")
+                if prompt.strip():
+                    return prompt
+        except Exception as e:
+            logger.warning(f"Failed to read custom prompt: {e}")
+        return None
 
     @abstractmethod
     async def start(self) -> None:

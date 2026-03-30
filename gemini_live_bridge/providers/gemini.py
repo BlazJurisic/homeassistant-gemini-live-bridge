@@ -67,7 +67,10 @@ Ti: [pozovi end_conversation()] "Doviđenja!"
             system_instruction = "You are a helpful home assistant. Control devices and answer questions."
 
         self.voice_name = config.get("gemini_voice", "Zephyr")
-        self.system_instruction = system_instruction
+
+        # Use custom prompt from dashboard if available, otherwise default
+        custom_prompt = self.get_custom_prompt()
+        self.system_instruction = custom_prompt if custom_prompt else system_instruction
 
     async def start(self) -> None:
         """Start the Gemini Live session."""

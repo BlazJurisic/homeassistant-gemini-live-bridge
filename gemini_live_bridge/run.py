@@ -13,6 +13,7 @@ import logging
 from ha_client import HomeAssistantClient
 from device_connection import DeviceConnection
 from tools import ToolRegistry
+from web_server import start_web_server
 
 # Configuration from add-on options
 CONFIG_PATH = "/data/options.json"
@@ -125,8 +126,13 @@ async def main():
 
     logger.info("=" * 60)
 
-    server = BridgeServer(SERVER_PORT, config, ha_client, tool_registry)
-    await server.start()
+    bridge = BridgeServer(SERVER_PORT, config, ha_client, tool_registry)
+
+    # Start web dashboard alongside TCP server
+    web_srv = await start_web_server(bridge, ha_client, tool_registry, config, port=8099)
+    logger.info("Web dashboard started on port 8099")
+
+    await bridge.start()
 
 
 if __name__ == "__main__":

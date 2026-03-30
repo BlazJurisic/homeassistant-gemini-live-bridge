@@ -47,6 +47,11 @@ Potvrdi svaku izvršenu akciju kratko."""
         else:
             self.system_instruction = "You are a helpful home assistant. Control devices and answer questions."
 
+        # Use custom prompt from dashboard if available
+        custom_prompt = self.get_custom_prompt()
+        if custom_prompt:
+            self.system_instruction = custom_prompt
+
         # STT state
         self.transcript_queue: asyncio.Queue = asyncio.Queue()
         self.soniox_ws = None

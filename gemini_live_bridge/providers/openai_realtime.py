@@ -64,6 +64,11 @@ PRAVILA RAZGOVORA:
 
         self.voice = config.get("openai_voice", "alloy").lower()
 
+        # Use custom prompt from dashboard if available
+        custom_prompt = self.get_custom_prompt()
+        if custom_prompt:
+            self.system_instruction = custom_prompt
+
     def convert_device_audio(self, data: bytes) -> bytes:
         """Stereo 32-bit 16kHz -> mono 16-bit 24kHz for OpenAI."""
         mono_16k = convert_32bit_stereo_to_16bit_mono(data)
