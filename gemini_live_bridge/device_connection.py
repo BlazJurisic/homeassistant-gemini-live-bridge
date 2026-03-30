@@ -143,21 +143,29 @@ class DeviceConnection:
 
                 self.provider.playing = True
 
-                # Send entire chunk as one TCP message (like original code)
+                # Coalesce small queued chunks into larger TCP messages.
+                # OpenAI streams many 1920B chunks; sending each individually
+                # causes choppiness. Collect for up to 100ms then send as one.
+                # Gemini sends larger natural chunks so this is mostly a no-op.
+                # Cap at 24000B to stay under ESP32's 49KB recv buffer.
+                await asyncio.sleep(0.1)  # Let more chunks arrive
+                while not self.provider.audio_in_queue.empty() and len(data) < 24000:
+                    try:
+                        more = self.provider.audio_in_queue.get_nowait()
+                        data += more
+                    except asyncio.QueueEmpty:
+                        break
+
+                # Send coalesced chunk
                 header = struct.pack('>I', len(data))
                 self.writer.write(header + data)
                 await self.writer.drain()
                 chunks_sent += 1
                 bytes_sent += len(data)
 
-                # Pace sending to match real-time playback.
-                # 0.9x works for Gemini (real-time stream, need to stay ahead).
-                # 1.0x for burst providers (OpenAI) to avoid overwhelming ESP32
-                # mixer ring buffer which is only ~19KB/100ms.
-                from providers.gemini import GeminiProvider
-                pace = 0.9 if isinstance(self.provider, GeminiProvider) else 1.0
+                # Pace at 90% of real-time
                 chunk_duration = len(data) / BYTES_PER_SEC
-                await asyncio.sleep(chunk_duration * pace)
+                await asyncio.sleep(chunk_duration * 0.9)
 
                 # Mark not playing when queue is empty
                 if self.provider.audio_in_queue.empty():
