@@ -159,6 +159,7 @@ Ti: [pozovi end_conversation()] "Doviđenja!"
 
                 async for response in turn:
                     if data := response.data:
+                        self.playing = True
                         chunks += 1
                         try:
                             self.audio_in_queue.put_nowait(data)

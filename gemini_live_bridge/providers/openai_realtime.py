@@ -180,10 +180,9 @@ PRAVILA RAZGOVORA:
                     event_type = event.get("type", "")
 
                     if event_type == "response.audio.delta":
-                        # Stream audio as it arrives (like Gemini does).
-                        # This keeps provider.playing=True so ESP32 mutes mic.
-                        # Accumulate to ~2KB chunks to avoid tiny TCP messages
-                        # but stay well under ESP32's 49KB recv buffer.
+                        # Stream audio as it arrives.
+                        # Set playing=True immediately so ESP32 mutes mic.
+                        self.playing = True
                         audio_b64 = event.get("delta", "")
                         if audio_b64:
                             self._audio_accumulator += base64.b64decode(audio_b64)
@@ -211,6 +210,8 @@ PRAVILA RAZGOVORA:
                             self._audio_accumulator = b""
                         logger.info(f"Audio response complete, {audio_chunks} deltas")
                         audio_chunks = 0
+                        # Don't clear playing here - let send_to_device drain
+                        # the queue first. playing will be cleared after drain.
 
                     elif event_type == "response.audio_transcript.delta":
                         pass  # Partial transcript, ignore

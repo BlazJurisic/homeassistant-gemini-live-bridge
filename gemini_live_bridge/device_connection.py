@@ -137,11 +137,10 @@ class DeviceConnection:
                         self.provider.audio_in_queue.get(), timeout=1.0
                     )
                 except asyncio.TimeoutError:
+                    # No audio for 1 second - speaker done
                     if self.provider:
                         self.provider.playing = False
                     continue
-
-                self.provider.playing = True
 
                 # Coalesce small queued chunks into larger TCP messages.
                 # OpenAI streams many 1920B chunks; sending each individually
@@ -166,10 +165,6 @@ class DeviceConnection:
                 # Pace at 90% of real-time
                 chunk_duration = len(data) / BYTES_PER_SEC
                 await asyncio.sleep(chunk_duration * 0.9)
-
-                # Mark not playing when queue is empty
-                if self.provider.audio_in_queue.empty():
-                    self.provider.playing = False
 
                 if chunks_sent % 20 == 1:
                     qsize = self.provider.audio_in_queue.qsize()
