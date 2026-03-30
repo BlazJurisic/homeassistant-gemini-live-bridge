@@ -188,17 +188,16 @@ PRAVILA RAZGOVORA:
 
                     if event_type == "response.audio.delta":
                         # OpenAI sends large variable chunks (4800-26400B).
-                        # Split into ~1920B pieces to match Gemini's size.
-                        # This prevents overwhelming ESP32's small mixer buffer.
+                        # Split into exact 1920B pieces to match Gemini's size.
+                        # Carry remainder to next delta to avoid runt chunks.
                         self.playing = True
                         audio_b64 = event.get("delta", "")
                         if audio_b64:
-                            raw = base64.b64decode(audio_b64)
-                            # Split into 1920B chunks (same as Gemini natural size)
-                            offset = 0
-                            while offset < len(raw):
-                                chunk = raw[offset:offset + 1920]
-                                offset += 1920
+                            self._audio_accumulator += base64.b64decode(audio_b64)
+                            # Emit only full 1920B chunks, keep remainder
+                            while len(self._audio_accumulator) >= 1920:
+                                chunk = self._audio_accumulator[:1920]
+                                self._audio_accumulator = self._audio_accumulator[1920:]
                                 try:
                                     self.audio_in_queue.put_nowait(chunk)
                                 except asyncio.QueueFull:
@@ -210,6 +209,15 @@ PRAVILA RAZGOVORA:
                             audio_chunks += 1
 
                     elif event_type == "response.audio.done":
+                        # Pad and flush any remainder
+                        if self._audio_accumulator:
+                            # Pad with silence to full 1920B
+                            padded = self._audio_accumulator + b'\x00' * (1920 - len(self._audio_accumulator))
+                            try:
+                                self.audio_in_queue.put_nowait(padded)
+                            except asyncio.QueueFull:
+                                pass
+                            self._audio_accumulator = b""
                         logger.info(f"Audio response complete, {audio_chunks} deltas")
                         audio_chunks = 0
 
