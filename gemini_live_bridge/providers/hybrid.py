@@ -254,11 +254,22 @@ Potvrdi svaku izvršenu akciju kratko."""
                     # Convert to speech
                     audio_data = await self._text_to_speech(response_text)
                     if audio_data:
-                        # Split into chunks for streaming to device
-                        chunk_size = 4800  # 100ms at 24kHz 16-bit
-                        for i in range(0, len(audio_data), chunk_size):
-                            chunk = audio_data[i:i + chunk_size]
-                            self.audio_in_queue.put_nowait(chunk)
+                        self.playing = True
+                        # Split into 19200B chunks (400ms at 24kHz 16-bit)
+                        CHUNK = 19200
+                        for i in range(0, len(audio_data), CHUNK):
+                            chunk = audio_data[i:i + CHUNK]
+                            # Pad last chunk to full size
+                            if len(chunk) < CHUNK:
+                                chunk = chunk + b'\x00' * (CHUNK - len(chunk))
+                            try:
+                                self.audio_in_queue.put_nowait(chunk)
+                            except asyncio.QueueFull:
+                                try:
+                                    self.audio_in_queue.get_nowait()
+                                except asyncio.QueueEmpty:
+                                    pass
+                                self.audio_in_queue.put_nowait(chunk)
 
         except Exception as e:
             logger.error(f"Orchestrator error: {e}", exc_info=True)
@@ -388,54 +399,39 @@ Potvrdi svaku izvršenu akciju kratko."""
             return f"Error: {e}", []
 
     async def _text_to_speech(self, text: str) -> Optional[bytes]:
-        """Convert text to speech using Google Cloud TTS REST API.
+        """Convert text to speech using OpenAI TTS API.
 
-        Returns 24kHz 16-bit mono PCM audio bytes (LINEAR16).
+        Returns 24kHz 16-bit mono PCM audio bytes.
         """
-        api_key = self.tts_api_key
+        api_key = self.config.get("openai_api_key")
         if not api_key:
-            logger.error("No TTS API key configured")
+            logger.error("No OpenAI API key for TTS")
             return None
 
-        # Determine language from personality
-        croatian = self.config.get("croatian_personality", True)
-        language_code = "hr-HR" if croatian else "en-US"
-        voice_name = f"{language_code}-Standard-A"
+        voice = self.config.get("openai_voice", "alloy").lower()
 
         try:
             async with aiohttp.ClientSession() as session:
                 async with session.post(
-                    f"{GOOGLE_TTS_URL}?key={api_key}",
-                    json={
-                        "input": {"text": text},
-                        "voice": {
-                            "languageCode": language_code,
-                            "name": voice_name,
-                        },
-                        "audioConfig": {
-                            "audioEncoding": "LINEAR16",
-                            "sampleRateHertz": 24000,
-                        }
+                    "https://api.openai.com/v1/audio/speech",
+                    headers={
+                        "Authorization": f"Bearer {api_key}",
+                        "Content-Type": "application/json",
                     },
-                    timeout=aiohttp.ClientTimeout(total=10),
+                    json={
+                        "model": "tts-1",
+                        "input": text,
+                        "voice": voice,
+                        "response_format": "pcm",
+                    },
+                    timeout=aiohttp.ClientTimeout(total=15),
                 ) as resp:
                     if resp.status != 200:
                         error = await resp.text()
                         logger.error(f"TTS error: {resp.status} - {error}")
                         return None
 
-                    data = await resp.json()
-                    audio_content = data.get("audioContent", "")
-                    if not audio_content:
-                        return None
-
-                    # Decode base64 audio
-                    raw_audio = base64.b64decode(audio_content)
-
-                    # Google TTS returns WAV with header, strip it (44 bytes)
-                    if raw_audio[:4] == b'RIFF':
-                        raw_audio = raw_audio[44:]
-
+                    raw_audio = await resp.read()
                     logger.info(f"TTS generated {len(raw_audio)} bytes of audio")
                     return raw_audio
 
