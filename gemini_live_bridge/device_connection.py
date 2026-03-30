@@ -142,17 +142,21 @@ class DeviceConnection:
                         self.provider.playing = False
                     continue
 
-                # Send chunk directly - no coalescing.
-                # Matches exactly how Gemini works (proven smooth).
+                # Send chunk directly
                 header = struct.pack('>I', len(data))
                 self.writer.write(header + data)
                 await self.writer.drain()
                 chunks_sent += 1
                 bytes_sent += len(data)
 
-                # Pace at 90% of real-time (proven with Gemini)
+                # Pacing: if queue has backlog (burst provider like OpenAI),
+                # pace at exactly real-time to avoid overwhelming ESP32 mixer.
+                # If queue is low (streaming provider like Gemini), pace at
+                # 0.9x to stay slightly ahead and keep buffer topped up.
+                qsize = self.provider.audio_in_queue.qsize()
+                pace = 1.0 if qsize > 5 else 0.9
                 chunk_duration = len(data) / BYTES_PER_SEC
-                await asyncio.sleep(chunk_duration * 0.9)
+                await asyncio.sleep(chunk_duration * pace)
 
                 if chunks_sent % 20 == 1:
                     qsize = self.provider.audio_in_queue.qsize()
