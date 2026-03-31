@@ -18,7 +18,7 @@ logger = logging.getLogger(__name__)
 
 SONIOX_WS_URL = "wss://stt-rt.soniox.com/transcribe-websocket"
 OPENAI_REALTIME_URL = "wss://api.openai.com/v1/realtime"
-DEFAULT_MODEL = "gpt-4o-realtime-preview"
+DEFAULT_MODEL = "gpt-realtime-1.5"
 
 
 class HybridProvider(BaseProvider):

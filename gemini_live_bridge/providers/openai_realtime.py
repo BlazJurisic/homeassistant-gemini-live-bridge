@@ -14,7 +14,7 @@ from .base import BaseProvider
 logger = logging.getLogger(__name__)
 
 OPENAI_REALTIME_URL = "wss://api.openai.com/v1/realtime"
-DEFAULT_MODEL = "gpt-4o-realtime-preview"
+DEFAULT_MODEL = "gpt-realtime-1.5"
 
 
 class OpenAIRealtimeProvider(BaseProvider):

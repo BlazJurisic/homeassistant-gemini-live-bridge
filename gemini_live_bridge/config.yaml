@@ -1,5 +1,5 @@
 name: Voice Assistant Bridge
-version: "2.4.8"
+version: "2.4.9"
 slug: gemini_live_bridge
 description: Multi-provider full-duplex voice assistant bridge for ESP32 devices
 url: https://github.com/BlazJurisic/homeassistant-gemini-live-bridge
@@ -26,6 +26,7 @@ options:
   gemini_voice: "Zephyr"
   openai_api_key: ""
   openai_voice: "alloy"
+  openai_model: "gpt-realtime-1.5"
   server_port: 9872
   log_level: "debug"
   croatian_personality: true
@@ -40,6 +41,7 @@ schema:
   gemini_voice: list(Zephyr|Puck|Charon|Kore|Fenrir|Aoede)?
   openai_api_key: str?
   openai_voice: list(alloy|ash|ballad|coral|echo|sage|shimmer|verse)?
+  openai_model: list(gpt-realtime-1.5|gpt-realtime-2025-08-28|gpt-realtime-mini|gpt-4o-realtime-preview|gpt-4o-mini-realtime-preview)?
   server_port: int
   log_level: list(debug|info|warning|error)
   croatian_personality: bool

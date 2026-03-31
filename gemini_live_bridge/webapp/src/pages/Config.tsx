@@ -4,6 +4,7 @@ import { type BridgeConfig, getConfig, saveConfig } from '../api';
 const PROVIDERS = ['gemini', 'openai', 'hybrid'];
 const GEMINI_VOICES = ['Zephyr', 'Puck', 'Charon', 'Kore', 'Fenrir', 'Aoede'];
 const OPENAI_VOICES = ['alloy', 'ash', 'ballad', 'coral', 'echo', 'sage', 'shimmer', 'verse'];
+const OPENAI_MODELS = ['gpt-realtime-1.5', 'gpt-realtime-2025-08-28', 'gpt-realtime-mini', 'gpt-4o-realtime-preview', 'gpt-4o-mini-realtime-preview'];
 const LOG_LEVELS = ['debug', 'info', 'warning', 'error'];
 
 export default function Config() {
@@ -102,6 +103,17 @@ export default function Config() {
               >
                 {OPENAI_VOICES.map((v) => (
                   <option key={v} value={v}>{v}</option>
+                ))}
+              </select>
+            </Field>
+            <Field label="OpenAI Model">
+              <select
+                value={(config as Record<string, unknown>).openai_model as string || 'gpt-realtime-1.5'}
+                onChange={(e) => update('openai_model', e.target.value)}
+                className="input"
+              >
+                {OPENAI_MODELS.map((m) => (
+                  <option key={m} value={m}>{m}</option>
                 ))}
               </select>
             </Field>
