@@ -27,7 +27,7 @@ export default function Config() {
     setMessage('');
     try {
       await saveConfig(config);
-      setMessage('Saved! Restart the add-on to apply changes.');
+      setMessage('Saved to Supervisor! Restart the add-on to apply.');
     } catch (e: unknown) {
       setMessage(`Error: ${(e as Error).message}`);
     }

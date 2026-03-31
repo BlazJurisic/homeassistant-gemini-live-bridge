@@ -13,6 +13,7 @@ import time
 from pathlib import Path
 from typing import Any, Dict, Optional
 
+import aiohttp as aiohttp_lib
 from aiohttp import web
 
 logger = logging.getLogger(__name__)
@@ -92,21 +93,46 @@ class WebServer:
 
     async def handle_get_config(self, request: web.Request) -> web.Response:
         options = _read_options()
-        dashboard = _read_dashboard_config()
-        merged = {**options, **dashboard.get("config_overrides", {})}
         # Never expose full API keys
         for key in ("gemini_api_key", "openai_api_key"):
-            if merged.get(key):
-                val = merged[key]
-                merged[key] = val[:8] + "..." + val[-4:] if len(val) > 12 else "***"
-        return web.json_response(merged)
+            if options.get(key):
+                val = options[key]
+                options[key] = val[:8] + "..." + val[-4:] if len(val) > 12 else "***"
+        # Mask soniox key inside hybrid_settings
+        hs = options.get("hybrid_settings", {})
+        if isinstance(hs, dict) and hs.get("soniox_api_key"):
+            val = hs["soniox_api_key"]
+            hs["soniox_api_key"] = val[:8] + "..." + val[-4:] if len(val) > 12 else "***"
+        return web.json_response(options)
 
     async def handle_set_config(self, request: web.Request) -> web.Response:
         body = await request.json()
-        dashboard = _read_dashboard_config()
-        dashboard["config_overrides"] = body
-        _write_dashboard_config(dashboard)
-        return web.json_response({"ok": True})
+
+        # Read current options to merge (don't lose API keys when UI sends masked values)
+        current = _read_options()
+        for key in ("gemini_api_key", "openai_api_key"):
+            if body.get(key, "").endswith("...") or body.get(key, "") == "***":
+                body[key] = current.get(key, "")
+        # Handle nested soniox key
+        if "soniox_api_key" in body:
+            val = body.pop("soniox_api_key")
+            if not val or val.endswith("...") or val == "***":
+                val = current.get("hybrid_settings", {}).get("soniox_api_key", "")
+            body.setdefault("hybrid_settings", current.get("hybrid_settings", {}))
+            body["hybrid_settings"]["soniox_api_key"] = val
+
+        # Merge with current options so we don't lose unset fields
+        merged = {**current, **body}
+
+        # Write to Supervisor API so it takes effect
+        err = await self._set_supervisor_options(merged)
+        if err:
+            return web.json_response({"error": err}, status=500)
+
+        # Also update in-memory config so next session uses new values
+        self.config.update(merged)
+
+        return web.json_response({"ok": True, "restart_required": True})
 
     # ── Prompt ──────────────────────────────────────────────────────
 
@@ -268,6 +294,60 @@ class WebServer:
             text="<h2>Voice Assistant Bridge</h2><p>Web dashboard not built. Run <code>cd webapp && npm run build</code>.</p>",
             content_type="text/html",
         )
+
+    # ── Supervisor API ─────────────────────────────────────────────
+
+    async def _set_supervisor_options(self, options: Dict[str, Any]) -> Optional[str]:
+        """Write options to Supervisor API. Returns error string or None."""
+        token = self._get_supervisor_token()
+        if not token:
+            # Fallback: write directly to options.json (dev mode)
+            try:
+                with open(OPTIONS_PATH, "w") as f:
+                    json.dump(options, f, indent=2, ensure_ascii=False)
+                return None
+            except Exception as e:
+                return str(e)
+
+        slug = "350c5b11_gemini_live_bridge"
+        url = f"http://supervisor/addons/{slug}/options"
+        try:
+            async with aiohttp_lib.ClientSession() as session:
+                async with session.post(
+                    url,
+                    headers={
+                        "Authorization": f"Bearer {token}",
+                        "Content-Type": "application/json",
+                    },
+                    json={"options": options},
+                    timeout=aiohttp_lib.ClientTimeout(total=10),
+                ) as resp:
+                    data = await resp.json()
+                    if data.get("result") == "ok":
+                        logger.info("Supervisor options updated")
+                        return None
+                    else:
+                        err = data.get("message", str(data))
+                        logger.error(f"Supervisor options error: {err}")
+                        return err
+        except Exception as e:
+            logger.error(f"Failed to set supervisor options: {e}")
+            return str(e)
+
+    def _get_supervisor_token(self) -> Optional[str]:
+        token = os.environ.get("SUPERVISOR_TOKEN", "")
+        if token:
+            return token
+        for path in [
+            "/run/s6/container_environment/SUPERVISOR_TOKEN",
+            "/var/run/s6/container_environment/SUPERVISOR_TOKEN",
+        ]:
+            if os.path.exists(path):
+                with open(path) as f:
+                    token = f.read().strip()
+                if token:
+                    return token
+        return None
 
     # ── Helpers ──────────────────────────────────────────────────────
 
