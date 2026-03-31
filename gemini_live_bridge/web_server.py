@@ -13,7 +13,6 @@ import time
 from pathlib import Path
 from typing import Any, Dict, Optional
 
-import aiohttp as aiohttp_lib
 from aiohttp import web
 
 logger = logging.getLogger(__name__)
@@ -298,47 +297,14 @@ class WebServer:
     # ── Supervisor API ─────────────────────────────────────────────
 
     async def _set_supervisor_options(self, options: Dict[str, Any]) -> Optional[str]:
-        """Write options to Supervisor API. Returns error string or None."""
-        # Use the HA client's token (already resolved at startup)
-        token = self.ha_client.token if self.ha_client else None
-        if not token:
-            # Fallback: write directly to options.json (dev mode)
-            try:
-                with open(OPTIONS_PATH, "w") as f:
-                    json.dump(options, f, indent=2, ensure_ascii=False)
-                return None
-            except Exception as e:
-                return str(e)
-
-        # Supervisor API is at http://supervisor, not http://supervisor/core
-        slug = "350c5b11_gemini_live_bridge"
-        url = f"http://supervisor/addons/{slug}/options"
+        """Write options directly to options.json. Returns error string or None."""
         try:
-            async with aiohttp_lib.ClientSession() as session:
-                async with session.post(
-                    url,
-                    headers={
-                        "Authorization": f"Bearer {token}",
-                        "Content-Type": "application/json",
-                    },
-                    json={"options": options},
-                    timeout=aiohttp_lib.ClientTimeout(total=10),
-                ) as resp:
-                    text = await resp.text()
-                    logger.info(f"Supervisor response: {resp.status} {text[:200]}")
-                    if resp.status == 200:
-                        try:
-                            data = json.loads(text)
-                            if data.get("result") == "ok":
-                                logger.info("Supervisor options updated")
-                                return None
-                            return data.get("message", text)
-                        except json.JSONDecodeError:
-                            return f"Unexpected response: {text[:200]}"
-                    else:
-                        return f"{resp.status}: {text[:200]}"
+            with open(OPTIONS_PATH, "w") as f:
+                json.dump(options, f, indent=2, ensure_ascii=False)
+            logger.info("Options saved to options.json")
+            return None
         except Exception as e:
-            logger.error(f"Failed to set supervisor options: {e}")
+            logger.error(f"Failed to write options.json: {e}")
             return str(e)
 
     # ── Helpers ──────────────────────────────────────────────────────
