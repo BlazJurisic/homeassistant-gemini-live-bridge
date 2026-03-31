@@ -208,6 +208,10 @@ PRAVILA RAZGOVORA:
                 if audio_data is None:
                     break
 
+                # Mute mic while speaker is playing to prevent echo loop
+                if self.playing:
+                    continue
+
                 mono_audio = self.convert_device_audio(audio_data)
                 await self.soniox_ws.send_bytes(mono_audio)
                 chunks += 1
